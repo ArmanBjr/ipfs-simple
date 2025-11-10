@@ -12,3 +12,6 @@ Repo Layout
 - storage/    : chunks/ , manifests/ (ignored)
 - tests/      : unit & e2e
 - docs/       : design & architecture
+
+##  Contributing
+Please read the [CONTRIBUTING.md](./CONTRIBUTING.md) for instructions on how to contribute.
