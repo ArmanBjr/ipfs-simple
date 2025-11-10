@@ -4,7 +4,7 @@ Python HTTP gateway + C core engine (IPC, thread pool). Chunking + hashing + man
 
 Quick Start (Windows)
 - Gateway: cd gateway_py → python -m venv .venv → .\.venv\Scripts\activate → pip install -r requirements.txt → python main.py → open http://127.0.0.1:8000/health
-- Engine: cd c_engine → make → .\build\engine (اگر make نداری فعلاً این بخش را رد کن)
+- Engine: cd c_engine → make → .\build\engine 
 
 Repo Layout
 - gateway_py/ : Python HTTP gateway (FastAPI)
