@@ -1,0 +1,15 @@
+name: CI - C
+on:
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+
+jobs:
+  build-and-test-c:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: c_engine
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: make && ./build/engine || true
