@@ -21,10 +21,10 @@ jobs:
       - name: Install deps (gateway requirements + pytest)
         run: |
           . .venv/bin/activate
-          pip install -r gateway_py/requirements.txt
+          pip install -r gateway/requirements.txt
           pip install pytest
 
       - name: Run tests
         run: |
           . .venv/bin/activate
-          pytest -q tests/py
+          PYTHONPATH=. pytest -q gateway/tests
