@@ -13,6 +13,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "engine_config.h"
+#include "protocol.h"
+
 
 #define OP_UPLOAD_START  0x01
 #define OP_UPLOAD_CHUNK  0x02
@@ -25,79 +28,54 @@
 
 static const char* g_sock_path = NULL;
 
-ssize_t read_n(int fd, void* buf, size_t n) {
-    size_t got = 0;
-    while (got < n) {
-        ssize_t r = read(fd, (char*)buf + got, n - got);
-        if (r == 0) return 0;
-        if (r < 0) { if (errno == EINTR) continue; perror("read"); return -1; }
-        got += r;
-    }
-    return (ssize_t)got;
-}
-
-int write_all(int fd, const void* buf, size_t n) {
-    size_t sent = 0;
-    while (sent < n) {
-        ssize_t w = write(fd, (const char*)buf + sent, n - sent);
-        if (w < 0) { if (errno == EINTR) continue; perror("write"); return -1; }
-        sent += (size_t)w;
-    }
-    return 0;
-}
-
-int send_frame(int fd, uint8_t op, const void* payload, uint32_t len) {
-    uint8_t header[5];
-    header[0] = op;
-    uint32_t be_len = htonl(len);
-    memcpy(header + 1, &be_len, 4);
-    if (write_all(fd, header, 5) < 0) return -1;
-    if (len && write_all(fd, payload, len) < 0) return -1;
-    return 0;
-}
-
 void handle_connection(int cfd) {
     for (;;) {
-        uint8_t header[5];
-        ssize_t r = read_n(cfd, header, 5);
-        if (r == 0) break;
-        if (r < 0) { break; }
-        uint8_t op = header[0];
-        uint32_t len;
-        memcpy(&len, header + 1, 4);
-        len = ntohl(len);
+        uint8_t op = 0;
         uint8_t* payload = NULL;
-        if (len) {
-            payload = (uint8_t*)malloc(len);
-            if (!payload) { perror("malloc"); break; }
-            if (read_n(cfd, payload, len) <= 0) { free(payload); break; }
+        uint32_t len = 0;
+
+        int rc = recv_frame(cfd, &op, &payload, &len);
+        if (rc == 0) {
+            // EOF
+            break;
+        }
+        if (rc < 0) {
+            // error
+            break;
         }
 
         if (op == OP_UPLOAD_START) {
             printf("[ENGINE] UPLOAD_START: name=\"%.*s\"\n", (int)len, (char*)payload);
             fflush(stdout);
             // TODO: initialize upload state
+
         } else if (op == OP_UPLOAD_CHUNK) {
             // TODO: process chunk (hash/store); here just drop
+
         } else if (op == OP_UPLOAD_FINISH) {
-            // TODO: finalize DAG and compute real CID
             const char* cid = "CID-PLACEHOLDER";
             printf("[ENGINE] UPLOAD_FINISH -> returning CID %s\n", cid);
             fflush(stdout);
             send_frame(cfd, OP_UPLOAD_DONE, cid, (uint32_t)strlen(cid));
+
         } else if (op == OP_DOWNLOAD_START) {
             printf("[ENGINE] DOWNLOAD_START: cid=\"%.*s\"\n", (int)len, (char*)payload);
             fflush(stdout);
             // TODO: look up CID, stream verified chunks
-            // Minimal placeholder: no chunks, just DONE
             send_frame(cfd, OP_DOWNLOAD_DONE, NULL, 0);
+
         } else {
+            // unknown opcode: ignore for now
         }
 
-        free(payload);
+        if (payload) {
+            free(payload);
+        }
     }
+
     close(cfd);
 }
+
 
 int main(int argc, char** argv) {
     if (argc != 2) {
