@@ -58,3 +58,9 @@ Thumbs.db
 # Environment variables
 .env
 .env.*
+*.pdf
+
+/c_engine/download_files/
+/c_engine/manifests/
+/c_engine/blocks/
+

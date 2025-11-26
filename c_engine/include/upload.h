@@ -27,6 +27,8 @@ typedef struct upload_ctx {
     // Pointer to the manifest object (NULL during this phase).
     struct manifest* manifest;
 
+    uint8_t*  buffer;      
+    uint32_t  buffer_len;
 } upload_ctx;
 
 // Allocate and initialize a new upload_ctx.
