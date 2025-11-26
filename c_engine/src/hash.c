@@ -14,51 +14,37 @@
 #include "hash.h"
 #include "util.h"
 
-/**
- * Fake hash function for phase 4.
- *
- * This function does NOT compute a real cryptographic hash.
- * It simply generates an 8-byte digest based on:
- *   - the length of the input data
- *   - the static marker bytes: 'F','A','K','E','H','S'
- *
- * This is extremely useful for testing the full pipeline:
- *   upload → hash → blockstore → manifest
- *
- * Later we will replace this with a real BLAKE3 implementation.
- */
- int hash_compute(hash_algo_t algo, const uint8_t* data, size_t len, hash_result_t* out) {
-    if (!out) {
-        log_error("[HASH] hash_compute called with NULL out");
-        return -1;
-    }
-    if (len > 0 && !data) {
-        log_error("[HASH] hash_compute called with NULL data but len=%zu", len);
-        return -1;
-    }
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include "hash.h"
 
-    // Fill output structure
+int hash_compute(hash_algo_t algo, const uint8_t* data, size_t len, hash_result_t* out) {
+    if (!data || !out) return -1;
+
+    (void)algo; 
+
     out->algo = algo;
     out->digest_len = 8;
+    out->digest = (uint8_t*)malloc(8);
+    if (!out->digest) return -1;
 
-    out->digest = (uint8_t*)malloc(out->digest_len);
-    if (!out->digest) {
-        log_error("[HASH] malloc failed for digest");
-        return -1;
+// FNV-1a 64-bit fake hash 
+    uint64_t h = 1469598103934665603ULL;      // offset basis
+    const uint64_t prime = 1099511628211ULL;  // FNV prime
+
+    for (size_t i = 0; i < len; ++i) {
+        h ^= (uint64_t)data[i];
+        h *= prime;
     }
 
-    // --- Fake digest ---
-    out->digest[0] = (uint8_t)(len & 0xFF);
-    out->digest[1] = (uint8_t)((len >> 8) & 0xFF);
-    out->digest[2] = 'F';
-    out->digest[3] = 'A';
-    out->digest[4] = 'K';
-    out->digest[5] = 'E';
-    out->digest[6] = 'H';
-    out->digest[7] = 'S';
+    for (int i = 0; i < 8; ++i) {
+        out->digest[7 - i] = (uint8_t)((h >> (i * 8)) & 0xFF);
+    }
 
     return 0;
 }
+
 
 
 

@@ -5,6 +5,9 @@
 #include <string.h>
 
 #include "download.h"
+#include "manifest.h"
+#include "blockstore.h"
+#include "hash.h"
 
 // Create a new download context for a single connection / download.
 download_ctx* download_ctx_create(void) {
@@ -33,15 +36,12 @@ void download_ctx_destroy(download_ctx* ctx) {
     }
 
     if (ctx->manifest) {
-        // TODO: call manifest_free(ctx->manifest) in later phases.
+        manifest_free(ctx->manifest);
         ctx->manifest = NULL;
     }
 
     free(ctx);
 }
-
-// Initialize download context for a given CID.
-// In later phases we will also load the manifest here.
 int download_init(download_ctx* ctx, const char* cid) {
     if (!ctx) {
         fprintf(stderr, "[DOWNLOAD] ERROR: download_init called with NULL ctx\n");
@@ -52,8 +52,8 @@ int download_init(download_ctx* ctx, const char* cid) {
         return -1;
     }
 
-    if (ctx->cid != NULL) {
-        fprintf(stderr, "[DOWNLOAD] WARNING: download_init called on an already initialized ctx\n");
+    // Free previous cid if this context is reused
+    if (ctx->cid) {
         free(ctx->cid);
         ctx->cid = NULL;
     }
@@ -64,68 +64,132 @@ int download_init(download_ctx* ctx, const char* cid) {
         return -1;
     }
 
-    ctx->current_index = 0;
-    // ctx->manifest will be loaded in a later phase.
+    // If there was an old manifest, free it first
+    if (ctx->manifest) {
+        manifest_free(ctx->manifest);
+        ctx->manifest = NULL;
+    }
 
-    fprintf(stderr, "[DOWNLOAD] init: cid=%s\n", ctx->cid);
+    // Load manifest from disk using the CID
+    ctx->manifest = manifest_load_from_cid(cid);
+    if (!ctx->manifest) {
+        fprintf(stderr,
+                "[DOWNLOAD] ERROR: failed to load manifest for cid=%s\n",
+                cid);
+
+        return -1;
+    }
+
+    // Start from the first chunk
+    ctx->current_index = 0;
+
+    fprintf(stderr,
+            "[DOWNLOAD] init: cid=%s, chunks=%u, total_size=%llu\n",
+            ctx->cid,
+            ctx->manifest->chunk_count,
+            (unsigned long long)ctx->manifest->total_size);
+
     return 0;
 }
 
-// Retrieve the next chunk to send to the client.
-//
-// Stub behavior for this phase:
-//  - On the first call (current_index == 0), return a single test chunk "DUMMY".
-//  - On subsequent calls, report EOF (no more chunks).
-//
-// Return codes:
-//   1 -> a valid chunk is returned
-//   0 -> EOF (no more chunks)
-//  <0 -> error
+
+
 int download_next_chunk(download_ctx* ctx, uint8_t** out_data, uint32_t* out_len) {
-    if (!ctx) {
-        fprintf(stderr, "[DOWNLOAD] ERROR: download_next_chunk called with NULL ctx\n");
+    if (!ctx || !out_data || !out_len) {
+        fprintf(stderr, "[DOWNLOAD] ERROR: download_next_chunk called with NULL args\n");
         return -1;
     }
 
-    if (!out_data || !out_len) {
-        fprintf(stderr, "[DOWNLOAD] ERROR: download_next_chunk called with NULL out_data/out_len\n");
-        return -1;
-    }
-
-    // First call: return a single test chunk.
-    if (ctx->current_index == 0) {
-        const char* test_str = "DUMMY";
-        const uint32_t len = 5; // length of "DUMMY" without null terminator
-
-        uint8_t* buf = (uint8_t*)malloc(len);
-        if (!buf) {
-            fprintf(stderr, "[DOWNLOAD] ERROR: failed to allocate test chunk buffer\n");
-            return -1;
-        }
-
-        memcpy(buf, test_str, len);
-
-        *out_data = buf;
-        *out_len  = len;
-
-        fprintf(stderr,
-                "[DOWNLOAD] next_chunk: cid=%s, index=%u (stub: sending test chunk \"%s\")\n",
-                ctx->cid ? ctx->cid : "(null)",
-                ctx->current_index,
-                test_str);
-
-        ctx->current_index += 1;
-        return 1; // one valid chunk
-    }
-
-    // Subsequent calls: EOF.
     *out_data = NULL;
     *out_len  = 0;
 
-    fprintf(stderr,
-            "[DOWNLOAD] next_chunk: cid=%s, index=%u (stub: EOF)\n",
-            ctx->cid ? ctx->cid : "(null)",
-            ctx->current_index);
+    if (!ctx->manifest) {
+        fprintf(stderr, "[DOWNLOAD] ERROR: download_next_chunk called without manifest\n");
+        return -1;
+    }
 
-    return 0; // EOF, no more chunks
+    // EOF: all chunks have been sent
+    if (ctx->current_index >= ctx->manifest->chunk_count) {
+        fprintf(stderr,
+                "[DOWNLOAD] next_chunk: cid=%s, index=%u -> EOF\n",
+                ctx->cid ? ctx->cid : "(null)",
+                ctx->current_index);
+        return 0;  // no more chunks
+    }
+
+    const manifest_chunk* c = &ctx->manifest->chunks[ctx->current_index];
+
+    // 1) Load block data from blockstore
+    uint8_t* buf = NULL;
+    size_t   real_len = 0;
+    if (blockstore_get(c->hash_str, &buf, &real_len) < 0) {
+        fprintf(stderr,
+                "[DOWNLOAD] ERROR: blockstore_get failed for hash=%s (index=%u)\n",
+                c->hash_str ? c->hash_str : "(null)",
+                c->index);
+        return -1;
+    }
+
+    // 2) Sanity check: size from manifest vs actual file size
+    if (real_len != c->size) {
+        fprintf(stderr,
+                "[DOWNLOAD] WARNING: size mismatch for chunk index=%u: manifest=%u, file=%zu\n",
+                c->index, c->size, real_len);
+        // We continue, but this is suspicious.
+    }
+
+    // 3) Optional: verify hash (using current hash implementation)
+    //    This recomputes the hash over the loaded data and compares
+    //    it with the stored multihash string.
+    hash_result_t h;
+    memset(&h, 0, sizeof(h));
+    char* mh_str = NULL;
+
+    if (hash_compute(hash_algo_from_env(), buf, real_len, &h) < 0) {
+        fprintf(stderr,
+                "[DOWNLOAD] ERROR: hash_compute failed for chunk index=%u\n",
+                c->index);
+        free(buf);
+        return -1;
+    }
+
+    if (hash_to_multihash_b32(&h, &mh_str) < 0) {
+        fprintf(stderr,
+                "[DOWNLOAD] ERROR: hash_to_multihash_b32 failed for chunk index=%u\n",
+                c->index);
+        hash_result_free(&h);
+        free(buf);
+        return -1;
+    }
+
+    // Compare stored hash string with recomputed one
+    if (!c->hash_str || strcmp(c->hash_str, mh_str) != 0) {
+        fprintf(stderr,
+                "[DOWNLOAD] ERROR: hash mismatch for chunk index=%u\n"
+                "         manifest: %s\n"
+                "         recomputed: %s\n",
+                c->index,
+                c->hash_str ? c->hash_str : "(null)",
+                mh_str ? mh_str : "(null)");
+        hash_result_free(&h);
+        free(mh_str);
+        free(buf);
+        return -1;
+    }
+
+    hash_result_free(&h);
+    free(mh_str);
+
+    // 4) Success: return this chunk to caller
+    *out_data = buf;
+    *out_len  = (uint32_t)real_len;
+
+    fprintf(stderr,
+            "[DOWNLOAD] next_chunk: cid=%s, index=%u, len=%u (hash OK)\n",
+            ctx->cid ? ctx->cid : "(null)",
+            ctx->current_index,
+            *out_len);
+
+    ctx->current_index++;
+    return 1;
 }

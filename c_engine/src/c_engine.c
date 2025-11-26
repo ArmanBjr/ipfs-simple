@@ -188,18 +188,50 @@ void handle_connection(int cfd) {
 
             free(cid_str);
 
-            // Stub behavior for this phase: immediately signal DONE.
-            if (send_frame(cfd, OP_DOWNLOAD_DONE, NULL, 0) < 0) {
-                fprintf(stderr, "[ERROR] [ENGINE] send_frame(OP_DOWNLOAD_DONE) failed\n");
-                close_conn = 1;
+            
+            for (;;) {
+                uint8_t* data = NULL;
+                uint32_t dlen = 0;
+
+                int rc2 = download_next_chunk(down, &data, &dlen);
+                if (rc2 < 0) {
+                    fprintf(stderr, "[ERROR] [DOWNLOAD] download_next_chunk failed\n");
+                    if (data) {
+                        free(data);
+                    }
+                    close_conn = 1;
+                    break;
+                }
+                if (rc2 == 0) {
+                   
+                    break;
+                }
+
+                if (send_frame(cfd, OP_DOWNLOAD_CHUNK, data, dlen) < 0) {
+                    fprintf(stderr,
+                            "[ERROR] [ENGINE] send_frame(OP_DOWNLOAD_CHUNK) failed\n");
+                    free(data);
+                    close_conn = 1;
+                    break;
+                }
+
+                free(data);
             }
 
-            // We can destroy the download context here since we do not stream chunks yet.
+            if (!close_conn) {
+                if (send_frame(cfd, OP_DOWNLOAD_DONE, NULL, 0) < 0) {
+                    fprintf(stderr,
+                            "[ERROR] [ENGINE] send_frame(OP_DOWNLOAD_DONE) failed\n");
+                    close_conn = 1;
+                }
+            }
+
             download_ctx_destroy(down);
             down = NULL;
 
             break;
         }
+
 
         default:
             fprintf(stderr,
