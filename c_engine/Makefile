@@ -17,7 +17,8 @@ SRCS = \
     src/hash.c \
     src/manifest.c \
     src/locks.c \
-    src/util.c
+    src/util.c \
+    src/threadpool.c
 
 OBJS = $(SRCS:.c=.o)
 

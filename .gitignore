@@ -22,7 +22,9 @@ wheels/
 venv/
 env/
 ENV/
-
+*.mp3
+*.mp4
+/c_engine/upload_test_files/
 # Testing
 .pytest_cache/
 .coverage

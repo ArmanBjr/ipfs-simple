@@ -40,8 +40,21 @@ void download_ctx_destroy(download_ctx* ctx) {
         ctx->manifest = NULL;
     }
 
+    if (ctx->cur_block) {
+        free(ctx->cur_block);
+        ctx->cur_block = NULL;
+    }
+
+    ctx->cur_block_len = 0;
+    ctx->cur_block_pos = 0;
+
     free(ctx);
 }
+
+// Initialize a download context with a given CID:
+// - store CID
+// - load manifest from disk
+// - reset streaming state
 int download_init(download_ctx* ctx, const char* cid) {
     if (!ctx) {
         fprintf(stderr, "[DOWNLOAD] ERROR: download_init called with NULL ctx\n");
@@ -80,8 +93,16 @@ int download_init(download_ctx* ctx, const char* cid) {
         return -1;
     }
 
-    // Start from the first chunk
+    // Start from the first manifest chunk
     ctx->current_index = 0;
+
+    // Reset streaming state
+    if (ctx->cur_block) {
+        free(ctx->cur_block);
+        ctx->cur_block = NULL;
+    }
+    ctx->cur_block_len = 0;
+    ctx->cur_block_pos = 0;
 
     fprintf(stderr,
             "[DOWNLOAD] init: cid=%s, chunks=%u, total_size=%llu\n",
@@ -92,11 +113,23 @@ int download_init(download_ctx* ctx, const char* cid) {
     return 0;
 }
 
-
-
-int download_next_chunk(download_ctx* ctx, uint8_t** out_data, uint32_t* out_len) {
+// INTERNAL: load a full manifest chunk (block) into memory.
+//
+// On success:
+//   - allocates *out_data with malloc()
+//   - sets *out_len
+//   - advances ctx->current_index
+//   - returns 1
+// On EOF (no more chunks):
+//   - returns 0
+// On error:
+//   - returns -1
+static int download_load_full_block(download_ctx* ctx,
+                                    uint8_t** out_data,
+                                    uint32_t* out_len) {
     if (!ctx || !out_data || !out_len) {
-        fprintf(stderr, "[DOWNLOAD] ERROR: download_next_chunk called with NULL args\n");
+        fprintf(stderr,
+                "[DOWNLOAD] ERROR: download_load_full_block: invalid args\n");
         return -1;
     }
 
@@ -104,20 +137,22 @@ int download_next_chunk(download_ctx* ctx, uint8_t** out_data, uint32_t* out_len
     *out_len  = 0;
 
     if (!ctx->manifest) {
-        fprintf(stderr, "[DOWNLOAD] ERROR: download_next_chunk called without manifest\n");
+        fprintf(stderr,
+                "[DOWNLOAD] ERROR: download_load_full_block: no manifest\n");
         return -1;
     }
 
-    // EOF: all chunks have been sent
+    // EOF: all manifest chunks consumed
     if (ctx->current_index >= ctx->manifest->chunk_count) {
         fprintf(stderr,
-                "[DOWNLOAD] next_chunk: cid=%s, index=%u -> EOF\n",
+                "[DOWNLOAD] load_full_block: cid=%s, index=%u -> EOF\n",
                 ctx->cid ? ctx->cid : "(null)",
                 ctx->current_index);
-        return 0;  // no more chunks
+        return 0;
     }
 
-    const manifest_chunk* c = &ctx->manifest->chunks[ctx->current_index];
+    uint32_t idx = ctx->current_index;
+    const manifest_chunk* c = &ctx->manifest->chunks[idx];
 
     // 1) Load block data from blockstore
     uint8_t* buf = NULL;
@@ -139,8 +174,6 @@ int download_next_chunk(download_ctx* ctx, uint8_t** out_data, uint32_t* out_len
     }
 
     // 3) Optional: verify hash (using current hash implementation)
-    //    This recomputes the hash over the loaded data and compares
-    //    it with the stored multihash string.
     hash_result_t h;
     memset(&h, 0, sizeof(h));
     char* mh_str = NULL;
@@ -166,7 +199,7 @@ int download_next_chunk(download_ctx* ctx, uint8_t** out_data, uint32_t* out_len
     if (!c->hash_str || strcmp(c->hash_str, mh_str) != 0) {
         fprintf(stderr,
                 "[DOWNLOAD] ERROR: hash mismatch for chunk index=%u\n"
-                "         manifest: %s\n"
+                "         manifest:   %s\n"
                 "         recomputed: %s\n",
                 c->index,
                 c->hash_str ? c->hash_str : "(null)",
@@ -180,16 +213,80 @@ int download_next_chunk(download_ctx* ctx, uint8_t** out_data, uint32_t* out_len
     hash_result_free(&h);
     free(mh_str);
 
-    // 4) Success: return this chunk to caller
     *out_data = buf;
     *out_len  = (uint32_t)real_len;
 
     fprintf(stderr,
-            "[DOWNLOAD] next_chunk: cid=%s, index=%u, len=%u (hash OK)\n",
+            "[DOWNLOAD] load_full_block: cid=%s, index=%u, len=%u (hash OK)\n",
             ctx->cid ? ctx->cid : "(null)",
-            ctx->current_index,
+            idx,
             *out_len);
 
     ctx->current_index++;
+    return 1;
+}
+
+// Stream-oriented API:
+// Fill 'out_buf' with up to 'max_len' bytes of file data.
+// Internally manages cur_block / cur_block_pos to slice manifest blocks
+// into arbitrary-sized frames.
+//
+// Returns:
+//   1 -> some data written, *out_len > 0
+//   0 -> EOF (no more data)
+//  -1 -> error
+int download_stream_next(download_ctx* ctx,
+                         uint8_t* out_buf,
+                         uint32_t max_len,
+                         uint32_t* out_len) {
+    if (!ctx || !out_buf || !out_len) {
+        fprintf(stderr,
+                "[DOWNLOAD] ERROR: download_stream_next: invalid args\n");
+        return -1;
+    }
+
+    *out_len = 0;
+
+    if (!ctx->manifest) {
+        fprintf(stderr,
+                "[DOWNLOAD] ERROR: download_stream_next: no manifest\n");
+        return -1;
+    }
+
+    // Ensure we have some data in cur_block.
+    // If cur_block is exhausted (or not allocated yet), load the next block.
+    while (ctx->cur_block_pos >= ctx->cur_block_len) {
+        // Free previous block if any
+        if (ctx->cur_block) {
+            free(ctx->cur_block);
+            ctx->cur_block = NULL;
+        }
+        ctx->cur_block_len = 0;
+        ctx->cur_block_pos = 0;
+
+        uint8_t* new_block = NULL;
+        uint32_t new_len   = 0;
+        int rc = download_load_full_block(ctx, &new_block, &new_len);
+        if (rc < 0) {
+            // Error already logged
+            return -1;
+        } else if (rc == 0) {
+            // EOF: no more blocks
+            return 0;
+        }
+
+        ctx->cur_block     = new_block;
+        ctx->cur_block_len = new_len;
+        ctx->cur_block_pos = 0;
+    }
+
+    // Now we have some bytes available in cur_block.
+    uint32_t remaining = ctx->cur_block_len - ctx->cur_block_pos;
+    uint32_t to_copy   = (remaining < max_len) ? remaining : max_len;
+
+    memcpy(out_buf, ctx->cur_block + ctx->cur_block_pos, to_copy);
+    ctx->cur_block_pos += to_copy;
+    *out_len = to_copy;
+
     return 1;
 }

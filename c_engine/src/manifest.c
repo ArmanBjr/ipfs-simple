@@ -17,6 +17,7 @@
 #include "manifest.h"       // manifest / manifest_chunk declarations
 #include "hash.h"           // hash_compute, hash_to_multihash_b32, hash_result_t
 #include "util.h"           // util_join_path, util_mkdir_p, logging helpers
+#include "locks.h"
 
 
 // Build full path for a manifest file: ENGINE_MANIFEST_DIR/<cid>.json
@@ -143,12 +144,14 @@ void manifest_finalize(manifest* m, uint64_t total_size) {
               cmp_chunk_index);
     }
 }
-
 int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
     if (!m || !out_cid) {
         return -1;
     }
     *out_cid = NULL;
+
+    // Writer lock برای نوشتن/ساخت manifest جدید
+    pthread_rwlock_wrlock(&g_manifest_lock);
 
     //
     // 1) Build JSON in-memory using open_memstream
@@ -158,6 +161,7 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
 
     FILE* mem = open_memstream(&json_buf, &json_len);
     if (!mem) {
+        pthread_rwlock_unlock(&g_manifest_lock);
         return -1;
     }
 
@@ -197,6 +201,7 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
 
     if (!json_buf || json_len == 0) {
         free(json_buf);
+        pthread_rwlock_unlock(&g_manifest_lock);
         return -1;
     }
 
@@ -213,6 +218,7 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
                      json_len,
                      &h) < 0) {
         free(json_buf);
+        pthread_rwlock_unlock(&g_manifest_lock);
         return -1;
     }
 
@@ -220,6 +226,7 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
     if (hash_to_multihash_b32(&h, &cid) < 0) {
         hash_result_free(&h);
         free(json_buf);
+        pthread_rwlock_unlock(&g_manifest_lock);
         return -1;
     }
 
@@ -233,6 +240,7 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
     if (util_mkdir_p(ENGINE_MANIFEST_DIR) < 0) {
         free(json_buf);
         free(cid);
+        pthread_rwlock_unlock(&g_manifest_lock);
         return -1;
     }
 
@@ -240,6 +248,7 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
     if (manifest_make_path(cid, path, sizeof(path)) < 0) {
         free(json_buf);
         free(cid);
+        pthread_rwlock_unlock(&g_manifest_lock);
         return -1;
     }
 
@@ -250,6 +259,7 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
     if (n < 0 || (size_t)n >= sizeof(tmp_path)) {
         free(json_buf);
         free(cid);
+        pthread_rwlock_unlock(&g_manifest_lock);
         return -1;
     }
 
@@ -257,6 +267,7 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
     if (fd < 0) {
         free(json_buf);
         free(cid);
+        pthread_rwlock_unlock(&g_manifest_lock);
         return -1;
     }
 
@@ -272,6 +283,7 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
             unlink(tmp_path);
             free(json_buf);
             free(cid);
+            pthread_rwlock_unlock(&g_manifest_lock);
             return -1;
         }
         written += (size_t)w;
@@ -282,6 +294,7 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
         unlink(tmp_path);
         free(json_buf);
         free(cid);
+        pthread_rwlock_unlock(&g_manifest_lock);
         return -1;
     }
 
@@ -289,6 +302,7 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
         unlink(tmp_path);
         free(json_buf);
         free(cid);
+        pthread_rwlock_unlock(&g_manifest_lock);
         return -1;
     }
 
@@ -297,16 +311,21 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
         unlink(tmp_path);
         free(json_buf);
         free(cid);
+        pthread_rwlock_unlock(&g_manifest_lock);
         return -1;
     }
 
     // We don't need JSON buffer anymore
     free(json_buf);
 
-    // Success: return CID string to caller
+    // موفقیت: CID را برگردان
     *out_cid = cid;
+
+    // آزاد کردن writer lock
+    pthread_rwlock_unlock(&g_manifest_lock);
     return 0;
 }
+
 
 
 
@@ -445,9 +464,13 @@ manifest* manifest_load_from_cid(const char* cid) {
         return NULL;
     }
 
+    // Reader lock برای خواندن manifest
+    pthread_rwlock_rdlock(&g_manifest_lock);
+
     char path[ENGINE_MAX_PATH_LEN];
     if (manifest_make_path(cid, path, sizeof(path)) < 0) {
         log_error("[MANIFEST] failed to build path for cid=%s", cid);
+        pthread_rwlock_unlock(&g_manifest_lock);
         return NULL;
     }
 
@@ -455,6 +478,7 @@ manifest* manifest_load_from_cid(const char* cid) {
     size_t json_len = 0;
     if (manifest_read_file(path, &json_buf, &json_len) < 0) {
         // error already logged
+        pthread_rwlock_unlock(&g_manifest_lock);
         return NULL;
     }
 
@@ -467,6 +491,7 @@ manifest* manifest_load_from_cid(const char* cid) {
     if (manifest_extract_string(json_buf, "filename", filename, sizeof(filename)) < 0) {
         log_error("[MANIFEST] failed to parse filename from %s", path);
         free(json_buf);
+        pthread_rwlock_unlock(&g_manifest_lock);
         return NULL;
     }
 
@@ -478,12 +503,14 @@ manifest* manifest_load_from_cid(const char* cid) {
     if (manifest_extract_u32(json_buf, "chunk_size", &chunk_size) < 0) {
         log_error("[MANIFEST] failed to parse chunk_size from %s", path);
         free(json_buf);
+        pthread_rwlock_unlock(&g_manifest_lock);
         return NULL;
     }
 
     if (manifest_extract_ull(json_buf, "total_size", &total_size_ull) < 0) {
         log_error("[MANIFEST] failed to parse total_size from %s", path);
         free(json_buf);
+        pthread_rwlock_unlock(&g_manifest_lock);
         return NULL;
     }
 
@@ -492,6 +519,7 @@ manifest* manifest_load_from_cid(const char* cid) {
     if (!m) {
         log_error("[MANIFEST] manifest_create failed while loading %s", path);
         free(json_buf);
+        pthread_rwlock_unlock(&g_manifest_lock);
         return NULL;
     }
 
@@ -501,6 +529,7 @@ manifest* manifest_load_from_cid(const char* cid) {
         log_error("[MANIFEST] no \"chunks\" array in %s", path);
         manifest_free(m);
         free(json_buf);
+        pthread_rwlock_unlock(&g_manifest_lock);
         return NULL;
     }
 
@@ -509,6 +538,7 @@ manifest* manifest_load_from_cid(const char* cid) {
         log_error("[MANIFEST] malformed chunks array in %s", path);
         manifest_free(m);
         free(json_buf);
+        pthread_rwlock_unlock(&g_manifest_lock);
         return NULL;
     }
 
@@ -527,6 +557,7 @@ manifest* manifest_load_from_cid(const char* cid) {
             log_error("[MANIFEST] unterminated chunk object in %s", path);
             manifest_free(m);
             free(json_buf);
+            pthread_rwlock_unlock(&g_manifest_lock);
             return NULL;
         }
 
@@ -536,6 +567,7 @@ manifest* manifest_load_from_cid(const char* cid) {
             log_error("[MANIFEST] chunk object too large in %s", path);
             manifest_free(m);
             free(json_buf);
+            pthread_rwlock_unlock(&g_manifest_lock);
             return NULL;
         }
 
@@ -561,6 +593,7 @@ manifest* manifest_load_from_cid(const char* cid) {
             log_error("[MANIFEST] failed to parse chunk object: %s", chunk_json);
             manifest_free(m);
             free(json_buf);
+            pthread_rwlock_unlock(&g_manifest_lock);
             return NULL;
         }
 
@@ -568,6 +601,7 @@ manifest* manifest_load_from_cid(const char* cid) {
             log_error("[MANIFEST] manifest_add_chunk failed while loading %s", path);
             manifest_free(m);
             free(json_buf);
+            pthread_rwlock_unlock(&g_manifest_lock);
             return NULL;
         }
 
@@ -579,8 +613,12 @@ manifest* manifest_load_from_cid(const char* cid) {
     manifest_finalize(m, (uint64_t)total_size_ull);
 
     free(json_buf);
+
+    // موفقیت → قفل را آزاد کن
+    pthread_rwlock_unlock(&g_manifest_lock);
     return m;
 }
+
 
 /**
  * Free all memory associated with a manifest structure.

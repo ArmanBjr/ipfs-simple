@@ -14,10 +14,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "locks.h"
 #include "engine_config.h"
 #include "protocol.h"
 #include "upload.h"
 #include "download.h"
+#include "threadpool.h"
+
 
 
 #define OP_UPLOAD_START   0x01
@@ -188,34 +191,29 @@ void handle_connection(int cfd) {
 
             free(cid_str);
 
-            
+            // Stream file contents as a sequence of OP_DOWNLOAD_CHUNK frames.
+            // Each frame will carry up to ENGINE_CHUNK_SIZE bytes.
             for (;;) {
-                uint8_t* data = NULL;
+                uint8_t  buf[ENGINE_CHUNK_SIZE];
                 uint32_t dlen = 0;
 
-                int rc2 = download_next_chunk(down, &data, &dlen);
+                int rc2 = download_stream_next(down, buf, (uint32_t)sizeof(buf), &dlen);
                 if (rc2 < 0) {
-                    fprintf(stderr, "[ERROR] [DOWNLOAD] download_next_chunk failed\n");
-                    if (data) {
-                        free(data);
-                    }
+                    fprintf(stderr, "[ERROR] [DOWNLOAD] download_stream_next failed\n");
                     close_conn = 1;
                     break;
                 }
                 if (rc2 == 0) {
-                   
+                    // EOF: no more data
                     break;
                 }
 
-                if (send_frame(cfd, OP_DOWNLOAD_CHUNK, data, dlen) < 0) {
+                if (send_frame(cfd, OP_DOWNLOAD_CHUNK, buf, dlen) < 0) {
                     fprintf(stderr,
                             "[ERROR] [ENGINE] send_frame(OP_DOWNLOAD_CHUNK) failed\n");
-                    free(data);
                     close_conn = 1;
                     break;
                 }
-
-                free(data);
             }
 
             if (!close_conn) {
@@ -231,6 +229,7 @@ void handle_connection(int cfd) {
 
             break;
         }
+
 
 
         default:
@@ -289,9 +288,28 @@ int main(int argc, char** argv) {
         close(fd);
         return 2;
     }
+    // Initialize global read/write locks before starting to listen.
+    if (locks_init() < 0) {
+        fprintf(stderr, "[ENGINE] ERROR: locks_init failed\n");
+        close(fd);
+        return 2;
+    }
+
+    // Initialize thread pool (fixed number of worker threads).
+    int num_workers = 4; // you can read this from an env var
+    if (threadpool_init(num_workers) < 0) {
+        fprintf(stderr, "[ENGINE] ERROR: threadpool_init failed\n");
+        close(fd);
+        locks_shutdown();
+        return 2;
+    }
+
     if (listen(fd, 64) < 0) {
         perror("listen");
         close(fd);
+        // locks_init succeeded; we can safely shut locks down.
+        threadpool_shutdown();
+        locks_shutdown();
         return 2;
     }
 
@@ -306,13 +324,16 @@ int main(int argc, char** argv) {
             perror("accept");
             break;
         }
-        // Thread-per-connection keeps it readable for OS labs.
-        pthread_t th;
-        pthread_create(&th, NULL, (void*(*)(void*))handle_connection, (void*)(intptr_t)cfd);
-        pthread_detach(th);
+
+        // Submit this connection as a job to the thread pool.
+        threadpool_submit_connection(cfd);
     }
 
+    // On error / shutdown, stop accepting new connections and
+    // gracefully shut down the thread pool.
+    threadpool_shutdown();
     close(fd);
     unlink(g_sock_path);
+    locks_shutdown();
     return 0;
 }
