@@ -8,6 +8,8 @@
 #include "manifest.h"
 #include "blockstore.h"
 #include "hash.h"
+#include "threadpool.h"
+
 
 // Create a new download context for a single connection / download.
 download_ctx* download_ctx_create(void) {
@@ -17,10 +19,28 @@ download_ctx* download_ctx_create(void) {
         return NULL;
     }
 
-    // All fields are zero-initialized by calloc.
+    if (pthread_mutex_init(&ctx->mutex, NULL) != 0) {
+        fprintf(stderr, "[DOWNLOAD] ERROR: failed to init mutex\n");
+        free(ctx);
+        return NULL;
+    }
+
+    if (pthread_cond_init(&ctx->cond, NULL) != 0) {
+        fprintf(stderr, "[DOWNLOAD] ERROR: failed to init cond\n");
+        pthread_mutex_destroy(&ctx->mutex);
+        free(ctx);
+        return NULL;
+    }
+
+    ctx->results           = NULL;
+    ctx->results_capacity  = 0;
+    ctx->next_request_index = 0;
+    ctx->next_send_index    = 0;
+
     fprintf(stderr, "[DOWNLOAD] download_ctx created\n");
     return ctx;
 }
+
 
 // Destroy a download context and free all associated resources.
 void download_ctx_destroy(download_ctx* ctx) {
@@ -48,8 +68,24 @@ void download_ctx_destroy(download_ctx* ctx) {
     ctx->cur_block_len = 0;
     ctx->cur_block_pos = 0;
 
+    if (ctx->results) {
+        for (uint32_t i = 0; i < ctx->results_capacity; ++i) {
+            if (ctx->results[i].data) {
+                free(ctx->results[i].data);
+                ctx->results[i].data = NULL;
+            }
+        }
+        free(ctx->results);
+        ctx->results = NULL;
+        ctx->results_capacity = 0;
+    }
+
+    pthread_mutex_destroy(&ctx->mutex);
+    pthread_cond_destroy(&ctx->cond);
+
     free(ctx);
 }
+
 
 // Initialize a download context with a given CID:
 // - store CID
@@ -290,3 +326,134 @@ int download_stream_next(download_ctx* ctx,
 
     return 1;
 }
+
+void download_chunk_job_run(struct download_chunk_job* job) {
+    if (!job || !job->ctx) {
+        fprintf(stderr, "[DOWNLOAD] download_chunk_job_run: invalid job\n");
+        return;
+    }
+
+    download_ctx* ctx = job->ctx;
+    uint32_t index = job->index;
+
+    if (!ctx->manifest) {
+        fprintf(stderr, "[DOWNLOAD] ERROR: no manifest in download_chunk_job_run\n");
+        return;
+    }
+
+    if (index >= ctx->manifest->chunk_count) {
+        fprintf(stderr,
+                "[DOWNLOAD] ERROR: chunk index %u out of range (chunk_count=%u)\n",
+                index,
+                ctx->manifest->chunk_count);
+        return;
+    }
+
+    const manifest_chunk* c = &ctx->manifest->chunks[index];
+
+    // 1) Load block data from blockstore
+    uint8_t* buf = NULL;
+    size_t   real_len = 0;
+    if (blockstore_get(c->hash_str, &buf, &real_len) < 0) {
+        fprintf(stderr,
+                "[DOWNLOAD] ERROR: blockstore_get failed for hash=%s (index=%u)\n",
+                c->hash_str ? c->hash_str : "(null)",
+                index);
+        return;
+    }
+
+    // 2) Sanity check: size from manifest vs actual file size
+    if (real_len != c->size) {
+        fprintf(stderr,
+                "[DOWNLOAD] WARNING: size mismatch for chunk index=%u: manifest=%u, file=%zu\n",
+                index, c->size, real_len);
+        // Continue but log warning.
+    }
+
+    // 3) Verify hash
+    hash_result_t h;
+    memset(&h, 0, sizeof(h));
+    char* mh_str = NULL;
+
+    if (hash_compute(hash_algo_from_env(), buf, real_len, &h) < 0) {
+        fprintf(stderr,
+                "[DOWNLOAD] ERROR: hash_compute failed for chunk index=%u\n",
+                index);
+        free(buf);
+        return;
+    }
+
+    if (hash_to_multihash_b32(&h, &mh_str) < 0) {
+        fprintf(stderr,
+                "[DOWNLOAD] ERROR: hash_to_multihash_b32 failed for chunk index=%u\n",
+                index);
+        hash_result_free(&h);
+        free(buf);
+        return;
+    }
+
+    if (!c->hash_str || strcmp(c->hash_str, mh_str) != 0) {
+        fprintf(stderr,
+                "[DOWNLOAD] ERROR: hash mismatch for chunk index=%u\n"
+                "         manifest:   %s\n"
+                "         recomputed: %s\n",
+                index,
+                c->hash_str ? c->hash_str : "(null)",
+                mh_str ? mh_str : "(null)");
+        hash_result_free(&h);
+        free(mh_str);
+        free(buf);
+        return;
+    }
+
+    hash_result_free(&h);
+    free(mh_str);
+
+    // 4) Store result into ctx->results[index] and signal waiting merger
+    pthread_mutex_lock(&ctx->mutex);
+
+    if (index >= ctx->results_capacity) {
+        uint32_t new_cap = ctx->results_capacity ? ctx->results_capacity : 16;
+        while (new_cap <= index) {
+            new_cap *= 2;
+        }
+
+        struct download_chunk_result* new_arr =
+            (struct download_chunk_result*)realloc(
+                ctx->results,
+                new_cap * sizeof(struct download_chunk_result)
+            );
+        if (!new_arr) {
+            fprintf(stderr,
+                    "[DOWNLOAD] ERROR: realloc failed in download_chunk_job_run\n");
+            pthread_mutex_unlock(&ctx->mutex);
+            free(buf);
+            return;
+        }
+
+        // Initialize new slots
+        for (uint32_t i = ctx->results_capacity; i < new_cap; ++i) {
+            new_arr[i].ready = 0;
+            new_arr[i].data  = NULL;
+            new_arr[i].len   = 0;
+        }
+
+        ctx->results = new_arr;
+        ctx->results_capacity = new_cap;
+    }
+
+    struct download_chunk_result* r = &ctx->results[index];
+
+    // If there is already data for this index (unexpected), free it
+    if (r->ready && r->data) {
+        free(r->data);
+    }
+
+    r->data  = buf;
+    r->len   = (uint32_t)real_len;
+    r->ready = 1;
+
+    pthread_cond_broadcast(&ctx->cond);
+    pthread_mutex_unlock(&ctx->mutex);
+}
+

@@ -14,33 +14,49 @@
 #include "hash.h"
 #include "util.h"
 
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
-#include "hash.h"
+
+#include "blake3.h"
+
+// void hash_selftest_blake3(void) {
+//     const uint8_t msg[] = "test";
+//     uint8_t out[32];
+
+//     blake3_hasher hasher;
+//     blake3_hasher_init(&hasher);
+//     blake3_hasher_update(&hasher, msg, sizeof(msg) - 1);
+//     blake3_hasher_finalize(&hasher, out, 32);
+//     (void)out;
+// }
+
 
 int hash_compute(hash_algo_t algo, const uint8_t* data, size_t len, hash_result_t* out) {
-    if (!data || !out) return -1;
-
-    (void)algo; 
-
-    out->algo = algo;
-    out->digest_len = 8;
-    out->digest = (uint8_t*)malloc(8);
-    if (!out->digest) return -1;
-
-// FNV-1a 64-bit fake hash 
-    uint64_t h = 1469598103934665603ULL;      // offset basis
-    const uint64_t prime = 1099511628211ULL;  // FNV prime
-
-    for (size_t i = 0; i < len; ++i) {
-        h ^= (uint64_t)data[i];
-        h *= prime;
+    if (!data || !out) {
+        log_error("[HASH] hash_compute: NULL argument");
+        return -1;
     }
 
-    for (int i = 0; i < 8; ++i) {
-        out->digest[7 - i] = (uint8_t)((h >> (i * 8)) & 0xFF);
+
+    if (algo != HASH_ALGO_BLAKE3) {
+        log_error("[HASH] unsupported algo=%d, using BLAKE3 instead", (int)algo);
+        algo = HASH_ALGO_BLAKE3;
     }
+
+    const size_t DIGEST_LEN = 32;  
+
+    uint8_t* buf = (uint8_t*)malloc(DIGEST_LEN);
+    if (!buf) {
+        log_error("[HASH] malloc failed in hash_compute");
+        return -1;
+    }
+
+    blake3_hasher hasher;
+    blake3_hasher_init(&hasher);
+    blake3_hasher_update(&hasher, data, len);
+    blake3_hasher_finalize(&hasher, buf, DIGEST_LEN);
+
+    out->algo       = algo;
+    out->digest     = buf;
+    out->digest_len = DIGEST_LEN;
 
     return 0;
 }
@@ -89,7 +105,7 @@ int hash_compute(hash_algo_t algo, const uint8_t* data, size_t len, hash_result_
         return -1;
     }
 
-    mh[0] = 0x01;                    // fake multihash algorithm code
+    mh[0] = 0x1E;                   
     mh[1] = (uint8_t)h->digest_len;  // digest length
     memcpy(mh + 2, h->digest, h->digest_len);
 

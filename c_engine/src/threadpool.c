@@ -9,6 +9,8 @@
 
 #include "threadpool.h"
 #include "upload.h"
+#include "download.h"
+
 
 // We need to call handle_connection() which is defined in c_engine.c
 extern void handle_connection(int cfd);
@@ -65,7 +67,7 @@ static job_t *dequeue_job(void) {
  * Each worker waits for jobs, takes one, executes it,
  * then repeats until shutdown is requested.
  */
-static void *worker_main(void *arg) {
+ static void *worker_main(void *arg) {
     (void)arg; // unused
 
     for (;;) {
@@ -98,13 +100,17 @@ static void *worker_main(void *arg) {
             free(job);
             break;
 
-            case JOB_TYPE_UPLOAD_CHUNK: {
-         
-                upload_chunk_job_run(&job->u.upload);
-        
-                free(job);
-                break;
-            }
+        case JOB_TYPE_UPLOAD_CHUNK: {
+            upload_chunk_job_run(&job->u.upload);
+            free(job);
+            break;
+        }
+
+        case JOB_TYPE_DOWNLOAD_CHUNK: {
+            download_chunk_job_run(&job->u.download);
+            free(job);
+            break;
+        }
 
         default:
             fprintf(stderr, "[THREADPOOL] Unknown job type: %d\n", job->type);
@@ -115,6 +121,7 @@ static void *worker_main(void *arg) {
 
     return NULL;
 }
+
 
 /**
  * Initialize the thread pool with num_workers worker threads.
@@ -217,6 +224,34 @@ int threadpool_submit_upload_chunk(upload_ctx* ctx,
     pthread_cond_signal(&g_job_cond);
     return 0;
 }
+
+
+int threadpool_submit_download_chunk(struct download_ctx* ctx, uint32_t index) {
+    if (!ctx) {
+        fprintf(stderr, "[THREADPOOL] download_chunk: NULL ctx\n");
+        return -1;
+    }
+
+    job_t *job = (job_t *)malloc(sizeof(job_t));
+    if (!job) {
+        fprintf(stderr, "[THREADPOOL] Failed to allocate job for download chunk\n");
+        return -1;
+    }
+
+    job->type             = JOB_TYPE_DOWNLOAD_CHUNK;
+    job->u.download.ctx   = ctx;
+    job->u.download.index = index;
+    job->next             = NULL;
+
+    pthread_mutex_lock(&g_job_mutex);
+    enqueue_job(job);
+    pthread_mutex_unlock(&g_job_mutex);
+
+    pthread_cond_signal(&g_job_cond);
+    return 0;
+}
+
+
 
 /**
  * Shutdown the thread pool:

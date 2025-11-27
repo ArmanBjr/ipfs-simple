@@ -20,6 +20,7 @@
 #include "upload.h"
 #include "download.h"
 #include "threadpool.h"
+#include "manifest.h"
 
 
 
@@ -191,29 +192,135 @@ void handle_connection(int cfd) {
 
             free(cid_str);
 
-            // Stream file contents as a sequence of OP_DOWNLOAD_CHUNK frames.
-            // Each frame will carry up to ENGINE_CHUNK_SIZE bytes.
-            for (;;) {
-                uint8_t  buf[ENGINE_CHUNK_SIZE];
-                uint32_t dlen = 0;
+            if (!down->manifest) {
+                fprintf(stderr, "[ERROR] [DOWNLOAD] no manifest after download_init\n");
+                close_conn = 1;
+                break;
+            }
 
-                int rc2 = download_stream_next(down, buf, (uint32_t)sizeof(buf), &dlen);
-                if (rc2 < 0) {
-                    fprintf(stderr, "[ERROR] [DOWNLOAD] download_stream_next failed\n");
-                    close_conn = 1;
-                    break;
-                }
-                if (rc2 == 0) {
-                    // EOF: no more data
-                    break;
-                }
+            uint32_t chunk_count = down->manifest->chunk_count;
 
-                if (send_frame(cfd, OP_DOWNLOAD_CHUNK, buf, dlen) < 0) {
+            // Edge case: empty file (no chunks)
+            if (chunk_count == 0) {
+                fprintf(stderr, "[ENGINE] DOWNLOAD_START: empty file, sending DONE\n");
+                if (send_frame(cfd, OP_DOWNLOAD_DONE, NULL, 0) < 0) {
                     fprintf(stderr,
-                            "[ERROR] [ENGINE] send_frame(OP_DOWNLOAD_CHUNK) failed\n");
+                            "[ERROR] [ENGINE] send_frame(OP_DOWNLOAD_DONE) failed\n");
+                    close_conn = 1;
+                }
+                download_ctx_destroy(down);
+                down = NULL;
+                break;
+            }
+
+            // Initialize merger state and preallocate result slots
+            pthread_mutex_lock(&down->mutex);
+
+            down->next_request_index = 0;
+            down->next_send_index    = 0;
+
+            if (down->results_capacity < chunk_count) {
+                uint32_t new_cap = chunk_count;
+                struct download_chunk_result* new_arr =
+                    (struct download_chunk_result*)realloc(
+                        down->results,
+                        new_cap * sizeof(struct download_chunk_result)
+                    );
+                if (!new_arr) {
+                    fprintf(stderr,
+                            "[ERROR] [DOWNLOAD] realloc failed in OP_DOWNLOAD_START\n");
+                    pthread_mutex_unlock(&down->mutex);
                     close_conn = 1;
                     break;
                 }
+
+                // Initialize new slots
+                for (uint32_t i = down->results_capacity; i < new_cap; ++i) {
+                    new_arr[i].ready = 0;
+                    new_arr[i].data  = NULL;
+                    new_arr[i].len   = 0;
+                }
+
+                down->results = new_arr;
+                down->results_capacity = new_cap;
+            }
+
+            // Reset any existing slots (if the context is ever reused)
+            for (uint32_t i = 0; i < chunk_count; ++i) {
+                if (down->results[i].data) {
+                    free(down->results[i].data);
+                    down->results[i].data = NULL;
+                }
+                down->results[i].ready = 0;
+                down->results[i].len   = 0;
+            }
+
+            pthread_mutex_unlock(&down->mutex);
+
+            // Submit one download job per chunk
+            for (uint32_t i = 0; i < chunk_count; ++i) {
+                if (threadpool_submit_download_chunk(down, i) < 0) {
+                    fprintf(stderr,
+                            "[ERROR] [DOWNLOAD] threadpool_submit_download_chunk failed for index=%u\n",
+                            i);
+                    close_conn = 1;
+                    break;
+                }
+            }
+
+            if (close_conn) {
+                break;
+            }
+
+            // Sequential merger: send chunks in order 0..chunk_count-1
+            while (!close_conn && down->next_send_index < chunk_count) {
+                pthread_mutex_lock(&down->mutex);
+
+                // Wait until the next chunk is ready
+                while (down->next_send_index < chunk_count &&
+                       (down->next_send_index >= down->results_capacity ||
+                        down->results[down->next_send_index].ready == 0)) {
+                    pthread_cond_wait(&down->cond, &down->mutex);
+                }
+
+                if (down->next_send_index >= chunk_count) {
+                    pthread_mutex_unlock(&down->mutex);
+                    break;
+                }
+
+                uint32_t idx = down->next_send_index;
+                struct download_chunk_result r = down->results[idx];
+
+                // Clear slot inside the context to avoid double-free on destroy
+                down->results[idx].data  = NULL;
+                down->results[idx].len   = 0;
+                down->results[idx].ready = 0;
+
+                down->next_send_index++;
+
+                pthread_mutex_unlock(&down->mutex);
+
+                if (!r.data || r.len == 0) {
+                    fprintf(stderr,
+                            "[ERROR] [DOWNLOAD] empty chunk data at index=%u\n",
+                            idx);
+                    if (r.data) {
+                        free(r.data);
+                    }
+                    close_conn = 1;
+                    break;
+                }
+
+                if (send_frame(cfd, OP_DOWNLOAD_CHUNK, r.data, r.len) < 0) {
+                    fprintf(stderr,
+                            "[ERROR] [ENGINE] send_frame(OP_DOWNLOAD_CHUNK) failed at index=%u\n",
+                            idx);
+                    free(r.data);
+                    close_conn = 1;
+                    break;
+                }
+
+                free(r.data);
             }
 
             if (!close_conn) {
@@ -229,6 +336,7 @@ void handle_connection(int cfd) {
 
             break;
         }
+
 
 
 
