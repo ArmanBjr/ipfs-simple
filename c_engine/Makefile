@@ -3,7 +3,7 @@
 # ============================
 
 CC      = gcc
-CFLAGS  = -O2 -pthread -Wall -Wextra -Iinclude -Ideps/blake3 \
+CFLAGS  = -g -O0 -pthread -Wall -Wextra -Iinclude -Ideps/blake3 \
           -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 -DBLAKE3_USE_NEON=0
 
 LDFLAGS =
