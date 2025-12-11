@@ -1,8 +1,41 @@
-services:
-  gateway:
-    build: ./gateway
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./gateway:/app
+version: '3.8'
 
+services:
+  engine:
+    build:
+      context: ./engine
+      network: host
+    container_name: ipfs-engine
+    network_mode: host
+    # dns:
+    #   - 8.8.8.8
+    #   - 8.8.4.4
+    volumes:
+      - engine-blocks:/app/blocks
+      - engine-manifests:/app/manifests
+      - engine-owners:/app/owners
+      - socket-volume:/tmp
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: ./gateway
+      network: host
+    container_name: ipfs-gateway
+    network_mode: host
+    # dns:
+    #   - 8.8.8.8
+    #   - 8.8.4.4
+    depends_on:
+      - engine
+    volumes:
+      - gateway-data:/app/data
+      - socket-volume:/tmp
+    restart: unless-stopped
+
+volumes:
+  engine-blocks:
+  engine-manifests:
+  engine-owners:
+  gateway-data:
+  socket-volume:
