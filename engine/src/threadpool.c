@@ -12,7 +12,7 @@
 #include "download.h"
 
 
-// We need to call handle_connection() which is defined in c_engine.c
+// We need to call handle_connection() which is defined in engine.c
 extern void handle_connection(int cfd);
 
 // Global worker array and count

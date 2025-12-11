@@ -7,11 +7,11 @@ CFLAGS  = -g -O0 -pthread -Wall -Wextra -Iinclude -Ideps/blake3 \
           -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 -DBLAKE3_USE_NEON=0
 
 LDFLAGS =
-TARGET  = c_engine
+TARGET  = engine
 
 # Source files
 SRCS = \
-    src/c_engine.c \
+    src/engine.c \
     src/protocol.c \
     src/upload.c \
     src/download.c \

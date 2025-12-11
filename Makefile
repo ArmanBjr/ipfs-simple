@@ -11,7 +11,7 @@ down:
 	sudo docker-compose down
 
 clean:
-	cd c_engine && $(MAKE) clean
-	rm -rf c_engine/blocks/* c_engine/manifests/* c_engine/owners/*
+	cd engine && $(MAKE) clean
+	rm -rf engine/blocks/* engine/manifests/* engine/owners/*
 	rm -rf gateway/data/* gateway/__pycache__ gateway/**/__pycache__ gateway/**/*.pyc
-	rm -f /tmp/cengine.sock
+	rm -f /tmp/engine.sock

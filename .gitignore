@@ -23,14 +23,14 @@ htmlcov/
 *.obj
 *.exe
 *.a
-c_engine/c_engine
-c_engine/src/*.o
-c_engine/deps/**/*.o
+engine/engine
+engine/src/*.o
+engine/deps/**/*.o
 
-# C Engine Runtime Data
-c_engine/blocks/
-c_engine/manifests/
-c_engine/owners/
+# Engine Runtime Data
+engine/blocks/
+engine/manifests/
+engine/owners/
 
 # Gateway Runtime Data
 gateway/data/

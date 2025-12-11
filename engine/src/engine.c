@@ -1,5 +1,5 @@
-// Build: gcc -O2 -pthread -o c_engine c_engine.c
-// Run:   ./c_engine /tmp/cengine.sock
+// Build: gcc -O2 -pthread -o engine engine.c
+// Run:   ./engine /tmp/engine.sock
 
 #define _GNU_SOURCE
 #include <sys/socket.h>
@@ -619,7 +619,7 @@ int main(int argc, char** argv) {
     sa.sa_handler = SIG_IGN;
     sigaction(SIGPIPE, &sa, NULL);
     if (argc != 2) {
-        fprintf(stderr, "usage: %s /tmp/cengine.sock\n", argv[0]);
+        fprintf(stderr, "usage: %s /tmp/engine.sock\n", argv[0]);
         return 2;
     }
     g_sock_path = argv[1];

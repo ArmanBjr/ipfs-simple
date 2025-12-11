@@ -8,8 +8,8 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: c_engine
+        working-directory: engine
     steps:
       - uses: actions/checkout@v4
       - name: Build
-        run: make && ./build/engine || true
+        run: make && ./engine || true

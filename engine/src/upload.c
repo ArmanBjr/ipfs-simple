@@ -476,7 +476,7 @@ int upload_handle_stream_data(upload_ctx* ctx, const uint8_t* data, uint32_t len
 }
 
 
-// Public entry point used by c_engine.c for each OP_UPLOAD_CHUNK frame.
+// Public entry point used by engine.c for each OP_UPLOAD_CHUNK frame.
 // This now treats the incoming frame as arbitrary stream data and lets
 // upload_handle_stream_data() take care of buffering and chunking.
 int upload_handle_chunk(upload_ctx* ctx, const uint8_t* data, uint32_t len) {

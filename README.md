@@ -23,12 +23,12 @@ Communication between gateway and engine happens via UNIX domain sockets using a
 ### 1. Build and Run Engine
 
 ```bash
-cd c_engine
+cd engine
 make
-./c_engine /tmp/cengine.sock
+./engine /tmp/engine.sock
 ```
 
-The engine listens on the specified socket path (default: `/tmp/cengine.sock`).
+The engine listens on the specified socket path (default: `/tmp/engine.sock`).
 
 ### 2. Run Gateway
 
@@ -44,7 +44,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 ```
 .
-├── c_engine/         # C storage engine
+├── engine/           # C storage engine
 │   ├── src/          # Source files
 │   ├── include/      # Header files
 │   └── deps/         # Dependencies (Blake3)
