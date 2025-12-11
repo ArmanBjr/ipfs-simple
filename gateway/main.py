@@ -1,29 +1,29 @@
+import sys
 from pathlib import Path
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
-from fastapi.staticfiles import StaticFiles
 
-BASE_DIR = Path(__file__).resolve().parent
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
+
+# Allow running as a script (uvicorn main:app from gateway dir) or as package (gateway.main)
+CURRENT_DIR = Path(__file__).resolve().parent
+PARENT_DIR = CURRENT_DIR.parent
+if str(PARENT_DIR) not in sys.path:
+    sys.path.insert(0, str(PARENT_DIR))
+
+from gateway.core.config import BASE_DIR, SECRET_KEY  # type: ignore
+from gateway.routers import auth, files, pages  # type: ignore
 
 app = FastAPI(
     title="IPFS Gateway",
     version="1.0.0",
     docs_url=None,
-    redoc_url=None
+    redoc_url=None,
 )
 
+app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
-@app.get("/", response_class=HTMLResponse)
-async def root(request: Request):
-    return templates.TemplateResponse(request, "index.html")
-
-@app.get("/docs", response_class=HTMLResponse)
-async def docs(request: Request):
-    return templates.TemplateResponse(request, "docs.html")
-
-@app.get("/try")
-async def try_page():
-    return "try page"
+app.include_router(pages.router)
+app.include_router(auth.router)
+app.include_router(files.router)
