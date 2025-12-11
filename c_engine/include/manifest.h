@@ -20,6 +20,7 @@ typedef struct manifest {
     char*           hash_algo;    // e.g., "blake3"
     uint32_t        chunk_count;  // number of chunks
     manifest_chunk* chunks;       // array of chunks
+    char*           auth_token;   // auth token for this manifest
 } manifest;
 
 // Create new manifest
@@ -45,3 +46,9 @@ manifest* manifest_load_from_cid(const char* cid);
 
 // Free manifest and all internal data
 void manifest_free(manifest* m);
+
+manifest* manifest_load_in_progress(const char* upload_id);
+
+struct manifest* manifest_load_in_progress(const char* upload_id);
+int manifest_save_progress(const manifest* m, const char* upload_id);
+int manifest_delete(const char* cid);

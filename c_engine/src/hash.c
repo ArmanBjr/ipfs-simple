@@ -17,6 +17,11 @@
 
 #include "blake3.h"
 
+
+// Fake/educational multicodec code for "manifest" (must be < 0x80 to be a 1-byte varint)
+#define CID_CODEC_MANIFEST  0x71  
+
+
 // void hash_selftest_blake3(void) {
 //     const uint8_t msg[] = "test";
 //     uint8_t out[32];
@@ -63,6 +68,46 @@ int hash_compute(hash_algo_t algo, const uint8_t* data, size_t len, hash_result_
 
 
 
+// RFC 4648 base32 alphabet, lower-case for CIDv1 ("b" multibase)
+static const char BASE32_ALPHABET[] = "abcdefghijklmnopqrstuvwxyz234567";
+
+static char* base32_encode(const uint8_t* data, size_t len) {
+    if (!data || len == 0) {
+        char* out = (char*)malloc(1);
+        if (out) out[0] = '\0';
+        return out;
+    }
+
+    
+    size_t out_len = (len * 8 + 4) / 5;  
+    char* out = (char*)malloc(out_len + 1);
+    if (!out) return NULL;
+
+    size_t bit_buffer = 0;
+    int bit_count = 0;
+    size_t out_pos = 0;
+
+    for (size_t i = 0; i < len; i++) {
+        bit_buffer = (bit_buffer << 8) | data[i];
+        bit_count += 8;
+
+        while (bit_count >= 5) {
+            int index = (bit_buffer >> (bit_count - 5)) & 0x1F;
+            bit_count -= 5;
+            out[out_pos++] = BASE32_ALPHABET[index];
+        }
+    }
+
+    if (bit_count > 0) {
+        int index = (bit_buffer << (5 - bit_count)) & 0x1F;
+        out[out_pos++] = BASE32_ALPHABET[index];
+    }
+
+    out[out_pos] = '\0';
+    return out;
+}
+
+
 
 /**
  * Convert a hash_result_t into a "multihash + base32-like" string.
@@ -87,7 +132,7 @@ int hash_compute(hash_algo_t algo, const uint8_t* data, size_t len, hash_result_
  *   0  on success
  *  -1  on error
  */
- int hash_to_multihash_b32(const hash_result_t* h, char** out_str) {
+int hash_to_multihash_b32(const hash_result_t* h, char** out_str) {
     if (!h || !out_str) {
         log_error("[HASH] hash_to_multihash_b32: NULL argument");
         return -1;
@@ -97,37 +142,57 @@ int hash_compute(hash_algo_t algo, const uint8_t* data, size_t len, hash_result_
         return -1;
     }
 
-    // Build a simple multihash buffer: [code][length][digest...]
-    size_t total_len = 2 + h->digest_len;
-    uint8_t* mh = (uint8_t*)malloc(total_len);
+    // 1) multihash: [code][len][digest...]
+    size_t mh_len = 2 + h->digest_len;
+    uint8_t* mh = (uint8_t*)malloc(mh_len);
     if (!mh) {
         log_error("[HASH] malloc failed for multihash buffer");
         return -1;
     }
 
-    mh[0] = 0x1E;                   
-    mh[1] = (uint8_t)h->digest_len;  // digest length
+    mh[0] = 0x1E;                    // کد رسمی BLAKE3-256 در multihash
+    mh[1] = (uint8_t)h->digest_len;  // باید 32 باشد
     memcpy(mh + 2, h->digest, h->digest_len);
 
-    // "Base32-like" encoding: we simply output uppercase hex (2 chars per byte).
-    size_t hex_len = total_len * 2;
-    char* hex = (char*)malloc(hex_len + 1);
-    if (!hex) {
-        log_error("[HASH] malloc failed for hex string");
+    // 2) payload = multicodec(manifest) || multihash
+    size_t payload_len = 1 + mh_len; // چون multicodec اینجا 1 بایتی است
+    uint8_t* payload = (uint8_t*)malloc(payload_len);
+    if (!payload) {
+        log_error("[HASH] malloc failed for payload buffer");
         free(mh);
         return -1;
     }
 
-    for (size_t i = 0; i < total_len; i++) {
-        // Each byte becomes two uppercase hex characters.
-        sprintf(hex + (i * 2), "%02X", mh[i]);
-    }
-    hex[hex_len] = '\0';
-
+    payload[0] = CID_CODEC_MANIFEST;  // multicodec(manifest)
+    memcpy(payload + 1, mh, mh_len);
     free(mh);
-    *out_str = hex;
+
+    // 3) base32(payload)  (بدون prefix)
+    char* b32 = base32_encode(payload, payload_len);
+    free(payload);
+    if (!b32) {
+        log_error("[HASH] base32_encode failed");
+        return -1;
+    }
+
+    // 4) multibase prefix 'b' + base32 → CID string
+    size_t b32_len = strlen(b32);
+    char* cid = (char*)malloc(b32_len + 2); // 'b' + ... + '\0'
+    if (!cid) {
+        log_error("[HASH] malloc failed for CID string");
+        free(b32);
+        return -1;
+    }
+
+    cid[0] = 'b';                 // multibase(base32, lower-case)
+    memcpy(cid + 1, b32, b32_len);
+    cid[b32_len + 1] = '\0';
+    free(b32);
+
+    *out_str = cid;
     return 0;
 }
+
 
 /**
  * Free the memory held inside a hash_result_t.

@@ -13,6 +13,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#define _POSIX_C_SOURCE 200809L
+#include <signal.h>
 
 #include "locks.h"
 #include "engine_config.h"
@@ -21,23 +24,17 @@
 #include "download.h"
 #include "threadpool.h"
 #include "manifest.h"
+#include "util.h"
 
 
-
-#define OP_UPLOAD_START   0x01
-#define OP_UPLOAD_CHUNK   0x02
-#define OP_UPLOAD_FINISH  0x03
-#define OP_UPLOAD_DONE    0x81
-
-#define OP_DOWNLOAD_START 0x11
-#define OP_DOWNLOAD_CHUNK 0x91
-#define OP_DOWNLOAD_DONE  0x92
 
 static const char* g_sock_path = NULL;
 
 void handle_connection(int cfd) {
     upload_ctx*   up   = NULL;
     download_ctx* down = NULL;
+    char* conn_auth_token = NULL;  
+
 
     for (;;) {
         uint8_t  op      = 0;
@@ -58,6 +55,28 @@ void handle_connection(int cfd) {
         int close_conn = 0;
 
         switch (op) {
+            case OP_AUTH: {
+                if (conn_auth_token != NULL) {
+                    fprintf(stderr, "[ENGINE] OP_AUTH received multiple times, ignoring\n");
+                    break;
+                }
+            
+                if (!payload || len == 0) {
+                    fprintf(stderr, "[AUTH] OP_AUTH received with empty token\n");
+                    close_conn = 1;
+                    break;
+                }
+            
+                conn_auth_token = strndup((char*)payload, len);
+                if (!conn_auth_token) {
+                    fprintf(stderr, "[AUTH] failed to allocate auth token\n");
+                    close_conn = 1;
+                    break;
+                }
+            
+                fprintf(stderr, "[AUTH] Received token: %s\n", conn_auth_token);
+                break;
+            }
         case OP_UPLOAD_START: {
             fprintf(stderr, "[ENGINE] OP_UPLOAD_START received (len=%u)\n", len);
 
@@ -69,6 +88,9 @@ void handle_connection(int cfd) {
             }
 
             up = upload_ctx_create();
+
+            up->auth_token = conn_auth_token ? strdup(conn_auth_token) : NULL;
+            
             if (!up) {
                 fprintf(stderr, "[ERROR] [UPLOAD] failed to create upload_ctx\n");
                 close_conn = 1;
@@ -98,8 +120,23 @@ void handle_connection(int cfd) {
             }
 
             break;
-        }
+        }   
+        
 
+        case OP_UPLOAD_RESUME: {
+            if (up != NULL) {
+                fprintf(stderr, "[ERROR] [UPLOAD] UPLOAD_RESUME received while upload already in progress\n");
+                close_conn = 1;
+                break;
+            }
+        
+            if (handle_upload_resume(&up, conn_auth_token, payload, len, cfd) < 0) {
+                close_conn = 1;
+            }
+        
+            break;
+        }
+        
         
         case OP_UPLOAD_FINISH: {
             fprintf(stderr, "[ENGINE] OP_UPLOAD_FINISH received\n");
@@ -112,11 +149,22 @@ void handle_connection(int cfd) {
             }
 
             char* cid = NULL;
-            if (upload_handle_finish(up, &cid) < 0) {
-                fprintf(stderr, "[ERROR] [UPLOAD] upload_handle_finish failed\n");
+            int finish_rc = upload_handle_finish(up, &cid);
+
+            if (finish_rc < 0) {
+                fprintf(stderr, "[ERROR] [UPLOAD] upload_handle_finish failed (rc=%d)\n", finish_rc);
+
+                if (finish_rc == -2 || cid == NULL) {
+                    const char* err_msg = "UPLOAD_ERROR";
+                    send_frame(cfd, OP_UPLOAD_DONE, err_msg, (uint32_t)strlen(err_msg));
+                }
+
+                upload_ctx_destroy(up);
+                up = NULL;
                 close_conn = 1;
                 break;
             }
+
 
             if (!cid) {
                 fprintf(stderr, "[ERROR] [UPLOAD] upload_handle_finish returned NULL cid\n");
@@ -140,6 +188,68 @@ void handle_connection(int cfd) {
             break;
         }
 
+        case OP_DELETE_FILE: {
+            char* cid_str = NULL;
+            if (payload && len > 0) {
+                cid_str = strndup((const char*)payload, len);
+            }
+        
+            if (!cid_str) {
+                fprintf(stderr, "[ERROR] DELETE_FILE: invalid CID\n");
+                close_conn = 1;
+                break;
+            }
+        
+            
+            char owner_path[ENGINE_MAX_PATH_LEN];
+            snprintf(owner_path, sizeof(owner_path), "owners/%s.owner", cid_str);
+        
+            FILE* f = fopen(owner_path, "r");
+            if (f) {
+                char owner_token[256];
+                if (fgets(owner_token, sizeof(owner_token), f)) {
+                    owner_token[strcspn(owner_token, "\r\n")] = '\0';  // Trim newline
+
+                    if (strncmp(owner_token, "owner-", 6) == 0) {
+                        if (!conn_auth_token || strcmp(owner_token, conn_auth_token) != 0) {
+                            fprintf(stderr, "[AUTH] Token mismatch: delete forbidden for CID=%s\n", cid_str);
+                            fclose(f);
+                            const char* err_msg = "AUTH_ERROR";
+                            send_frame(cfd, OP_UPLOAD_DONE, err_msg, (uint32_t)strlen(err_msg));
+                            free(cid_str);
+                            close_conn = 1;
+                            break;
+                        }
+                    }
+                }
+                fclose(f);
+            } else {
+                if (conn_auth_token != NULL) {
+                    fprintf(stderr, "[AUTH] Delete not allowed: no owner file for CID=%s\n", cid_str);
+                    const char* err_msg = "AUTH_ERROR";
+                    send_frame(cfd, OP_UPLOAD_DONE, err_msg, (uint32_t)strlen(err_msg));
+                    free(cid_str);
+                    close_conn = 1;
+                    break;
+                }
+            }
+
+        
+        
+            if (manifest_delete(cid_str) < 0) {
+                fprintf(stderr, "[DELETE] failed to delete manifest and chunks for CID=%s\n", cid_str);
+            } else {
+                fprintf(stderr, "[DELETE] deleted manifest and (possibly) orphaned chunks for CID=%s\n", cid_str);
+        
+                unlink(owner_path);
+            }
+        
+            free(cid_str);
+            break;
+        }
+        
+        
+
         case OP_DOWNLOAD_START: {
             fprintf(stderr, "[ENGINE] OP_DOWNLOAD_START received (len=%u)\n", len);
 
@@ -151,6 +261,7 @@ void handle_connection(int cfd) {
             }
 
             down = download_ctx_create();
+            down->auth_token = conn_auth_token ? strdup(conn_auth_token) : NULL;
             if (!down) {
                 fprintf(stderr, "[ERROR] [DOWNLOAD] failed to create download_ctx\n");
                 close_conn = 1;
@@ -178,9 +289,36 @@ void handle_connection(int cfd) {
                     break;
                 }
             }
+            
+            char owner_path[ENGINE_MAX_PATH_LEN];
+            snprintf(owner_path, sizeof(owner_path), "owners/%s.owner", cid_str);
+
+            FILE* f = fopen(owner_path, "r");
+            if (f) {
+                char owner_token[256];
+                if (fgets(owner_token, sizeof(owner_token), f)) {
+                    owner_token[strcspn(owner_token, "\r\n")] = '\0';  // Trim newline
+
+                    if (strncmp(owner_token, "owner-", 6) == 0) {
+                        if (!conn_auth_token || strcmp(owner_token, conn_auth_token) != 0) {
+                            fprintf(stderr, "[AUTH] Token mismatch: download forbidden for CID=%s\n", cid_str);
+                            fclose(f);
+                            const char* err_msg = "AUTH_ERROR";
+                            send_frame(cfd, OP_DOWNLOAD_DONE, err_msg, (uint32_t)strlen(err_msg));
+                            close_conn = 1;
+                            free(cid_str);
+                            break;
+                        }
+                    }
+                }
+                fclose(f);
+            }
+
 
             if (download_init(down, cid_str) < 0) {
-                fprintf(stderr, "[ERROR] [DOWNLOAD] download_init failed\n");
+                const char* err_msg = "DOWNLOAD_ERROR";
+                send_frame(cfd, OP_DOWNLOAD_DONE, err_msg, (uint32_t)strlen(err_msg));
+                fprintf(stderr, "[WARN] [DOWNLOAD] Invalid CID: \"%s\" (download_init failed)\n", cid_str);
                 free(cid_str);
                 close_conn = 1;
                 break;
@@ -340,6 +478,104 @@ void handle_connection(int cfd) {
 
 
 
+        case OP_LIST_FILES: {
+            fprintf(stderr, "[ENGINE] OP_LIST_FILES received\n");
+            
+            if (!conn_auth_token) {
+                fprintf(stderr, "[AUTH] LIST_FILES without auth token\n");
+                const char* err_msg = "[]";
+                send_frame(cfd, OP_LIST_RESPONSE, err_msg, (uint32_t)strlen(err_msg));
+                break;
+            }
+
+            char json_buf[1024 * 64] = "[";
+            int json_len = 1;
+            int first = 1;
+
+            DIR* dir = opendir("owners");
+            if (dir) {
+                struct dirent* entry;
+                while ((entry = readdir(dir)) != NULL) {
+                    if (strstr(entry->d_name, ".owner") == NULL) continue;
+
+                    char owner_path[ENGINE_MAX_PATH_LEN];
+                    snprintf(owner_path, sizeof(owner_path), "owners/%s", entry->d_name);
+
+                    FILE* f = fopen(owner_path, "r");
+                    if (!f) continue;
+
+                    char token[256];
+                    if (!fgets(token, sizeof(token), f)) {
+                        fclose(f);
+                        continue;
+                    }
+                    fclose(f);
+                    
+                    token[strcspn(token, "\r\n")] = '\0';
+                    if (strcmp(token, conn_auth_token) != 0) continue;
+
+                    char cid[128];
+                    strncpy(cid, entry->d_name, sizeof(cid) - 1);
+                    cid[sizeof(cid) - 1] = '\0';
+                    char* dot = strstr(cid, ".owner");
+                    if (dot) *dot = '\0';
+
+                    char manifest_path[ENGINE_MAX_PATH_LEN];
+                    snprintf(manifest_path, sizeof(manifest_path), "manifests/%s.json", cid);
+
+                    FILE* mf = fopen(manifest_path, "r");
+                    char filename[256] = "";
+                    uint64_t filesize = 0;
+                    
+                    if (mf) {
+                        char line[512];
+                        while (fgets(line, sizeof(line), mf)) {
+                            if (strstr(line, "\"filename\"")) {
+                                char* start = strchr(line, ':');
+                                if (start) {
+                                    start = strchr(start, '"');
+                                    if (start) {
+                                        start++;
+                                        char* end = strchr(start, '"');
+                                        if (end) {
+                                            int len = end - start;
+                                            if (len > 0 && len < (int)sizeof(filename)) {
+                                                strncpy(filename, start, len);
+                                                filename[len] = '\0';
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if (strstr(line, "\"total_size\"")) {
+                                char* start = strchr(line, ':');
+                                if (start) {
+                                    filesize = strtoull(start + 1, NULL, 10);
+                                }
+                            }
+                        }
+                        fclose(mf);
+                    }
+
+                    if (!first) {
+                        json_buf[json_len++] = ',';
+                    }
+                    first = 0;
+
+                    int n = snprintf(json_buf + json_len, sizeof(json_buf) - json_len,
+                                     "{\"cid\":\"%s\",\"filename\":\"%s\",\"size\":%llu}",
+                                     cid, filename[0] ? filename : cid, (unsigned long long)filesize);
+                    if (n > 0) json_len += n;
+                }
+                closedir(dir);
+            }
+
+            json_buf[json_len++] = ']';
+            json_buf[json_len] = '\0';
+
+            send_frame(cfd, OP_LIST_RESPONSE, json_buf, json_len);
+            break;
+        }
+
         default:
             fprintf(stderr,
                     "[ERROR] [ENGINE] unknown opcode: 0x%02x (len=%u)\n",
@@ -370,9 +606,18 @@ void handle_connection(int cfd) {
     }
 
     close(cfd);
+
+    if (conn_auth_token) {
+        free(conn_auth_token);
+        conn_auth_token = NULL;
+    }
 }
 
 int main(int argc, char** argv) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = SIG_IGN;
+    sigaction(SIGPIPE, &sa, NULL);
     if (argc != 2) {
         fprintf(stderr, "usage: %s /tmp/cengine.sock\n", argv[0]);
         return 2;
@@ -403,8 +648,30 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    // Initialize thread pool (fixed number of worker threads).
-    int num_workers = 4; // you can read this from an env var
+    // Initialize thread pool 
+    int num_workers = 16;  
+
+    long cpus = sysconf(_SC_NPROCESSORS_ONLN);  
+    fprintf(stderr, "[ENGINE] auto-detected number of workers: %ld\n", cpus);
+    if (cpus > 0 && cpus <= 256) {
+        num_workers = (int)cpus;
+    }
+
+    const char* env = getenv("CENGINE_WORKERS");
+    if (env != NULL) {
+        int parsed = atoi(env);
+        if (parsed > 0 && parsed <= 256) {
+            num_workers = parsed;  
+        } else {
+            fprintf(stderr, "[ENGINE] Invalid CENGINE_WORKERS env value: %s, using auto-detected=%d\n", env, num_workers);
+        }
+    }
+
+    if (util_mkdir_p("manifests/in-progress") < 0) {
+        fprintf(stderr, "[ENGINE] ERROR: failed to create in-progress manifest dir\n");
+        return 2;
+    }
+
     if (threadpool_init(num_workers) < 0) {
         fprintf(stderr, "[ENGINE] ERROR: threadpool_init failed\n");
         close(fd);
@@ -412,6 +679,12 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    if (util_mkdir_p("owners") < 0) {
+        fprintf(stderr, "[ENGINE] ERROR: failed to create owners directory\n");
+        return 2;
+    }
+
+    
     if (listen(fd, 64) < 0) {
         perror("listen");
         close(fd);

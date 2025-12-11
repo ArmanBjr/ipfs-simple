@@ -26,13 +26,20 @@ typedef struct upload_chunk_job {
     uint32_t    index;   // logical chunk index
 } upload_chunk_job_t;
 
+
+
 // Per-connection upload state.
 typedef struct upload_ctx {
     // Filename extracted from the UPLOAD_START payload.
     char* filename;
 
+    char* upload_id;
+
     // Total number of bytes successfully processed into chunks so far.
     uint64_t total_size;
+
+    // Declared total size received from the client at the beginning.
+    uint64_t declared_total_size;
 
     // Chunk size used for this upload. Usually ENGINE_CHUNK_SIZE.
     uint32_t chunk_size;
@@ -62,7 +69,13 @@ typedef struct upload_ctx {
     // Synchronization primitives for coordinating job completion and commit.
     pthread_mutex_t  commit_mutex;
     pthread_cond_t   commit_cond;
+
+    char*     auth_token;
 } upload_ctx;
+
+
+int handle_upload_resume(upload_ctx** out_up, const char* auth_token, const uint8_t* payload, uint32_t len, int cfd);
+
 
 // Allocate and initialize a new upload_ctx.
 // Returns NULL on failure.

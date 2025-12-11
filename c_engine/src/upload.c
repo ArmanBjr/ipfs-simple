@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
-
+#include <time.h>
 #include "engine_config.h"
 #include "upload.h"
 
@@ -13,6 +13,9 @@
 #include "blockstore.h"
 #include <pthread.h>
 #include "threadpool.h"
+#include <unistd.h>     
+#include "util.h"       
+#include "protocol.h"
 
 upload_ctx* upload_ctx_create(void) {
     upload_ctx* ctx = (upload_ctx*)calloc(1, sizeof(upload_ctx));
@@ -107,6 +110,17 @@ void upload_ctx_destroy(upload_ctx* ctx) {
     pthread_mutex_destroy(&ctx->commit_mutex);
     pthread_cond_destroy(&ctx->commit_cond);
 
+    if (ctx->auth_token) {
+        free(ctx->auth_token);
+        ctx->auth_token = NULL;
+    }
+
+    if (ctx->upload_id) {
+        free(ctx->upload_id);
+        ctx->upload_id = NULL;
+    }
+
+
     free(ctx);
 }
 
@@ -138,6 +152,10 @@ int upload_handle_start(upload_ctx* ctx, const uint8_t* payload, uint32_t len) {
         declared_total_size = (declared_total_size << 8) | (uint64_t)payload[i];
     }
 
+    ctx->declared_total_size = declared_total_size;
+    ctx->total_size          = 0;  
+
+
     const uint8_t* fname_bytes = payload + 8;
     uint32_t fname_len = len - 8;
 
@@ -167,6 +185,11 @@ int upload_handle_start(upload_ctx* ctx, const uint8_t* payload, uint32_t len) {
 
     // Create manifest for this upload (hash_algo = "blake3" for now).
     ctx->manifest = manifest_create(ctx->filename, ctx->chunk_size, "blake3");
+    if (ctx->auth_token) {
+        ctx->manifest->auth_token = strdup(ctx->auth_token);
+    }
+
+    
     if (!ctx->manifest) {
         fprintf(stderr, "[UPLOAD] ERROR: manifest_create failed\n");
         return -1;
@@ -178,70 +201,78 @@ int upload_handle_start(upload_ctx* ctx, const uint8_t* payload, uint32_t len) {
             (unsigned long long)declared_total_size,
             ctx->chunk_size);
 
-    return 0;
-}
 
+    ctx->declared_total_size = declared_total_size;
 
-// Process a single, full chunk of data.
-// - compute content hash
-// - convert to multihash (base32 string)
-// - store block in the blockstore
-// - append chunk entry to the manifest
-static int upload_process_full_chunk(upload_ctx* ctx, const uint8_t* data, uint32_t len) {
-    if (!ctx || !data || len == 0) {
-        fprintf(stderr, "[UPLOAD] ERROR: upload_process_full_chunk: invalid arguments\n");
-        return -1;
-    }
-    if (!ctx->manifest) {
-        fprintf(stderr, "[UPLOAD] ERROR: upload_process_full_chunk: manifest is NULL\n");
-        return -1;
-    }
-
-    hash_algo_t algo = hash_algo_from_env();
-    hash_result_t h;
-    memset(&h, 0, sizeof(h));
-
-    if (hash_compute(algo, data, (size_t)len, &h) < 0) {
-        fprintf(stderr, "[UPLOAD] ERROR: failed to compute chunk hash\n");
-        return -1;
-    }
-
-    char* mh_str = NULL;
-    if (hash_to_multihash_b32(&h, &mh_str) < 0 || !mh_str) {
-        fprintf(stderr, "[UPLOAD] ERROR: failed to convert hash to multihash base32\n");
-        hash_result_free(&h);
-        return -1;
-    }
-
-    // Store the block in the blockstore (deduplicated inside blockstore_put).
-    if (blockstore_put(mh_str, data, (size_t)len) < 0) {
-        fprintf(stderr, "[UPLOAD] ERROR: blockstore_put failed for chunk %u\n", ctx->next_chunk_index);
-        hash_result_free(&h);
-        free(mh_str);
-        return -1;
-    }
-
-    // Record this chunk in the manifest.
-    if (manifest_add_chunk(ctx->manifest, ctx->next_chunk_index, len, mh_str) < 0) {
-        fprintf(stderr, "[UPLOAD] ERROR: manifest_add_chunk failed for chunk %u\n", ctx->next_chunk_index);
-        hash_result_free(&h);
-        free(mh_str);
-        return -1;
-    }
-
-    // Update counters: we still keep total_size as "bytes actually chunked".
-    ctx->total_size      += (uint64_t)len;
-    ctx->next_chunk_index++;
-
-    hash_result_free(&h);
-    free(mh_str);
-
-    fprintf(stderr,
-        "[UPLOAD] processed full chunk index=%u, size=%u (total_size=%" PRIu64 ")\n",
-        ctx->next_chunk_index - 1, len, ctx->total_size);
+    // Generate upload_id from filename + timestamp
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s-%ld", ctx->filename ? ctx->filename : "file", time(NULL));
+    ctx->upload_id = strdup(buf);
 
     return 0;
 }
+
+
+// // Process a single, full chunk of data.
+// // - compute content hash
+// // - convert to multihash (base32 string)
+// // - store block in the blockstore
+// // - append chunk entry to the manifest
+// static int upload_process_full_chunk(upload_ctx* ctx, const uint8_t* data, uint32_t len) {
+//     if (!ctx || !data || len == 0) {
+//         fprintf(stderr, "[UPLOAD] ERROR: upload_process_full_chunk: invalid arguments\n");
+//         return -1;
+//     }
+//     if (!ctx->manifest) {
+//         fprintf(stderr, "[UPLOAD] ERROR: upload_process_full_chunk: manifest is NULL\n");
+//         return -1;
+//     }
+
+//     hash_algo_t algo = hash_algo_from_env();
+//     hash_result_t h;
+//     memset(&h, 0, sizeof(h));
+
+//     if (hash_compute(algo, data, (size_t)len, &h) < 0) {
+//         fprintf(stderr, "[UPLOAD] ERROR: failed to compute chunk hash\n");
+//         return -1;
+//     }
+
+//     char* mh_str = NULL;
+//     if (hash_to_multihash_b32(&h, &mh_str) < 0 || !mh_str) {
+//         fprintf(stderr, "[UPLOAD] ERROR: failed to convert hash to multihash base32\n");
+//         hash_result_free(&h);
+//         return -1;
+//     }
+
+//     // Store the block in the blockstore (deduplicated inside blockstore_put).
+//     if (blockstore_put(mh_str, data, (size_t)len) < 0) {
+//         fprintf(stderr, "[UPLOAD] ERROR: blockstore_put failed for chunk %u\n", ctx->next_chunk_index);
+//         hash_result_free(&h);
+//         free(mh_str);
+//         return -1;
+//     }
+
+//     // Record this chunk in the manifest.
+//     if (manifest_add_chunk(ctx->manifest, ctx->next_chunk_index, len, mh_str) < 0) {
+//         fprintf(stderr, "[UPLOAD] ERROR: manifest_add_chunk failed for chunk %u\n", ctx->next_chunk_index);
+//         hash_result_free(&h);
+//         free(mh_str);
+//         return -1;
+//     }
+
+//     // Update counters: we still keep total_size as "bytes actually chunked".
+//     ctx->total_size      += (uint64_t)len;
+//     ctx->next_chunk_index++;
+
+//     hash_result_free(&h);
+//     free(mh_str);
+
+//     fprintf(stderr,
+//         "[UPLOAD] processed full chunk index=%u, size=%u (total_size=%" PRIu64 ")\n",
+//         ctx->next_chunk_index - 1, len, ctx->total_size);
+
+//     return 0;
+// }
 
 // Worker-side function: process a single chunk job in a background thread.
 // - Compute the hash and convert it to a multihash string
@@ -255,9 +286,9 @@ void upload_chunk_job_run(upload_chunk_job_t* job) {
         return;
     }
 
-    upload_ctx* ctx = job->ctx;
-    uint8_t*    data = job->data;
-    uint32_t    len  = job->len;
+    upload_ctx* ctx   = job->ctx;
+    uint8_t*    data  = job->data;
+    uint32_t    len   = job->len;
     uint32_t    index = job->index;
 
     if (!ctx || !data || len == 0) {
@@ -266,14 +297,12 @@ void upload_chunk_job_run(upload_chunk_job_t* job) {
         if (data) {
             free(data);
         }
-        // free(job);
         return;
     }
 
     if (!ctx->manifest) {
         fprintf(stderr, "[UPLOAD] ERROR: upload_chunk_job_run: ctx->manifest is NULL\n");
         free(data);
-        // free(job);
         return;
     }
 
@@ -285,7 +314,6 @@ void upload_chunk_job_run(upload_chunk_job_t* job) {
     if (hash_compute(algo, data, (size_t)len, &h) < 0) {
         fprintf(stderr, "[UPLOAD] ERROR: upload_chunk_job_run: failed to compute chunk hash (index=%u)\n", index);
         free(data);
-        // free(job);
         return;
     }
 
@@ -294,7 +322,6 @@ void upload_chunk_job_run(upload_chunk_job_t* job) {
         fprintf(stderr, "[UPLOAD] ERROR: upload_chunk_job_run: failed to convert hash to multihash base32 (index=%u)\n", index);
         hash_result_free(&h);
         free(data);
-        // free(job);
         return;
     }
 
@@ -304,7 +331,6 @@ void upload_chunk_job_run(upload_chunk_job_t* job) {
         hash_result_free(&h);
         free(mh_str);
         free(data);
-        // free(job);
         return;
     }
 
@@ -327,7 +353,6 @@ void upload_chunk_job_run(upload_chunk_job_t* job) {
             hash_result_free(&h);
             free(mh_str);
             free(data);
-            // free(job);
             return;
         }
 
@@ -364,16 +389,25 @@ void upload_chunk_job_run(upload_chunk_job_t* job) {
     pthread_cond_broadcast(&ctx->commit_cond);
     pthread_mutex_unlock(&ctx->commit_mutex);
 
-    // 4) Cleanup temporary resources
+    // 4) آماده‌کردن preview برای لاگ قبل از آزاد کردن mh_str
+    char hash_preview[16];
+    hash_preview[0] = '\0';
+    if (mh_str) {
+        snprintf(hash_preview, sizeof(hash_preview), "%.*s", 10, mh_str);
+    }
+
     hash_result_free(&h);
     free(mh_str);
     free(data);
-    // free(job);
 
     fprintf(stderr,
-            "[UPLOAD] worker processed chunk index=%u, size=%u\n",
-            index, len);
+        "[UPLOAD] worker processed chunk index=%u, size=%u, hash=%s..., filename=\"%s\", ctx=%p\n",
+        index, len,
+        hash_preview,
+        ctx->filename ? ctx->filename : "(null)",
+        (void*)ctx);
 }
+
 
 
 // High-level stream handler:
@@ -530,11 +564,19 @@ int upload_handle_finish(upload_ctx* ctx, char** out_cid) {
             return -1;
         }
 
+        manifest_save_progress(ctx->manifest, ctx->upload_id);
+
+
         ctx->total_size += (uint64_t)r->size;
 
         fprintf(stderr,
-                "[UPLOAD] committed chunk index=%u, size=%u (total_size=%" PRIu64 ")\n",
-                idx, r->size, ctx->total_size);
+            "[UPLOAD] committed chunk index=%u, size=%u, hash=%.*s..., filename=\"%s\", ctx=%p, (total_size=%" PRIu64 ")\n",
+            idx, r->size,
+            10, r->hash_str ? r->hash_str : "(null)",
+            ctx->filename ? ctx->filename : "(null)",
+            (void*)ctx,
+            ctx->total_size);
+    
 
         // We have copied the hash into the manifest; we no longer need it here.
         if (r->hash_str) {
@@ -550,6 +592,31 @@ int upload_handle_finish(upload_ctx* ctx, char** out_cid) {
 
     pthread_mutex_unlock(&ctx->commit_mutex);
 
+
+    if (ctx->declared_total_size != 0 &&
+        ctx->total_size != ctx->declared_total_size) {
+
+        fprintf(stderr,
+                "[UPLOAD ERROR] received size (%" PRIu64 ") does not match declared size (%" PRIu64 ") for file \"%s\", ctx=%p\n",
+                ctx->total_size,
+                ctx->declared_total_size,
+                ctx->filename ? ctx->filename : "(null)",
+                (void*)ctx);
+
+        manifest_free(ctx->manifest);
+        ctx->manifest = NULL;
+
+        if (ctx->upload_id) {
+            char path[ENGINE_MAX_PATH_LEN];
+            snprintf(path, sizeof(path), "manifests/in-progress/%s.json", ctx->upload_id);
+            unlink(path);
+        }
+
+        *out_cid = NULL;
+        return -2;
+    }
+
+
     // Now all chunks have been committed to the manifest in order.
     manifest_finalize(ctx->manifest, ctx->total_size);
 
@@ -558,6 +625,12 @@ int upload_handle_finish(upload_ctx* ctx, char** out_cid) {
     if (manifest_save_and_get_cid(ctx->manifest, &cid) < 0 || !cid) {
         fprintf(stderr, "[UPLOAD] ERROR: manifest_save_and_get_cid failed\n");
         return -1;
+    }
+
+    if (ctx->upload_id) {
+        char path[ENGINE_MAX_PATH_LEN];
+        snprintf(path, sizeof(path), "manifests/in-progress/%s.json", ctx->upload_id);
+        unlink(path);
     }
 
     // Free manifest structure in memory.
@@ -572,6 +645,64 @@ int upload_handle_finish(upload_ctx* ctx, char** out_cid) {
             (unsigned long long)ctx->total_size,
             ctx->next_chunk_index,
             cid);
+
+    return 0;
+}
+
+
+int handle_upload_resume(upload_ctx** out_up, const char* auth_token, const uint8_t* payload, uint32_t len, int cfd) {
+    if (!out_up || !payload || len == 0) {
+        log_error("[RESUME] invalid args");
+        const char* err = "RESUME_ERROR: invalid arguments";
+        send_frame(cfd, OP_UPLOAD_DONE, err, (uint32_t)strlen(err));
+        return -1;
+    }
+
+    char* upload_id = strndup((const char*)payload, len);
+    if (!upload_id) {
+        const char* err = "RESUME_ERROR: memory error";
+        send_frame(cfd, OP_UPLOAD_DONE, err, (uint32_t)strlen(err));
+        return -1;
+    }
+
+    manifest* m = manifest_load_in_progress(upload_id);
+    if (!m) {
+        log_error("[RESUME] could not load manifest for upload_id=%s", upload_id);
+        free(upload_id);
+        const char* err = "RESUME_ERROR: no manifest found for upload_id";
+        send_frame(cfd, OP_UPLOAD_DONE, err, (uint32_t)strlen(err));
+        return -1;
+    }
+
+    upload_ctx* ctx = upload_ctx_create();
+    if (!ctx) {
+        manifest_free(m);
+        free(upload_id);
+        const char* err = "RESUME_ERROR: failed to create upload context";
+        send_frame(cfd, OP_UPLOAD_DONE, err, (uint32_t)strlen(err));
+        return -1;
+    }
+
+    ctx->upload_id   = upload_id;
+    ctx->manifest    = m;
+    ctx->filename    = strdup(m->filename);
+    ctx->chunk_size  = m->chunk_size;
+    ctx->total_size  = m->total_size;
+    ctx->next_chunk_index   = m->chunk_count;
+    ctx->next_submit_index  = m->chunk_count;
+    ctx->next_commit_index  = m->chunk_count;
+    ctx->declared_total_size = 0;
+
+    if (auth_token) {
+        ctx->auth_token = strdup(auth_token);
+    }
+
+    *out_up = ctx;
+
+    log_info("[RESUME] Resumed upload_id=%s (%u chunks already uploaded)", upload_id, m->chunk_count);
+
+    const char* ok = "RESUME_OK";
+    send_frame(cfd, OP_UPLOAD_DONE, ok, (uint32_t)strlen(ok));
 
     return 0;
 }

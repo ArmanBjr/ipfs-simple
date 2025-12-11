@@ -52,6 +52,7 @@ typedef struct download_ctx {
     pthread_mutex_t mutex;
     pthread_cond_t  cond;
 
+    char*     auth_token;
 } download_ctx;
 
 // Allocate and initialize a new download_ctx.

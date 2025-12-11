@@ -76,7 +76,7 @@ int blockstore_init(const char* root_dir) {
  *   0  on success
  *  -1  on invalid hash or path error
  */
- static int blockstore_make_path(const char* hash_str, char* out_path) {
+int blockstore_make_path(const char* hash_str, char* out_path) {
     if (!hash_str || strlen(hash_str) < 4) {
         return -1;  // hash too short for sharding
     }

@@ -21,3 +21,7 @@ int blockstore_exists(const char* hash_str);
 
 // Optional: remove block (for GC or cleanup)
 int blockstore_remove(const char* hash_str);
+
+// include/blockstore.h
+int blockstore_make_path(const char* hash_str, char* out_path);
+
