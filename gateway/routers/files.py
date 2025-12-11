@@ -2,9 +2,9 @@ import anyio
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import RedirectResponse, StreamingResponse
 
-from ..core.engine import engine_download_file, engine_list_files, engine_upload_bytes
-from ..core.users import get_current_user
-from ..core.web import render_template
+from core.engine import engine_download_file, engine_list_files, engine_upload_bytes
+from core.users import get_current_user
+from core.web import render_template
 
 router = APIRouter()
 

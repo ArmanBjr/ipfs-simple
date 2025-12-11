@@ -1,18 +1,9 @@
-import sys
-from pathlib import Path
-
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-# Allow running as a script (uvicorn main:app from gateway dir) or as package (gateway.main)
-CURRENT_DIR = Path(__file__).resolve().parent
-PARENT_DIR = CURRENT_DIR.parent
-if str(PARENT_DIR) not in sys.path:
-    sys.path.insert(0, str(PARENT_DIR))
-
-from gateway.core.config import BASE_DIR, SECRET_KEY  # type: ignore
-from gateway.routers import auth, files, pages  # type: ignore
+from core.config import BASE_DIR, SECRET_KEY
+from routers import auth, files, pages
 
 app = FastAPI(
     title="IPFS Gateway",

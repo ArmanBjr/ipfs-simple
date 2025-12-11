@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Form, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from ..core.users import create_user, get_current_user, make_auth_token, verify_user
-from ..core.web import render_template
+from core.users import create_user, get_current_user, make_auth_token, verify_user
+from core.web import render_template
 
 router = APIRouter()
 
