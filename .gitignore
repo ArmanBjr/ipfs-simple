@@ -53,5 +53,5 @@ Thumbs.db
 .env
 .env.*
 
-# Docs (optional)
+# Docs
 *.pdf

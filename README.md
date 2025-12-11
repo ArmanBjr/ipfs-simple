@@ -1,17 +1,66 @@
-# FUM OS Project 1 – Content-Addressed Storage
+# FUM OS Project - IPFS
 
-Python HTTP gateway + C core engine (IPC, thread pool). Chunking + hashing + manifests.
+Content-addressed storage system with FastAPI web gateway and C storage engine.
 
-Quick Start (Windows)
-- Gateway: cd gateway_py → python -m venv .venv → .\.venv\Scripts\activate → pip install -r requirements.txt → python main.py → open http://127.0.0.1:8000/health
-- Engine: cd c_engine → make → .\build\engine 
+## Overview
 
-Repo Layout
-- gateway_py/ : Python HTTP gateway (FastAPI)
-- c_engine/   : C core (IPC, thread pool)
-- storage/    : chunks/ , manifests/ (ignored)
-- tests/      : unit & e2e
-- docs/       : design & architecture
+This project implements an IPFS-like storage system where files are:
 
-##  Contributing
-Please read the [CONTRIBUTING.md](./CONTRIBUTING.md) for instructions on how to contribute.
+- **Chunked** into fixed-size blocks
+- **Hashed** using Blake3 for content addressing
+- **Stored** with deduplication
+- **Accessed** via content identifiers (CIDs)
+
+The system consists of two components:
+
+- **Gateway**: FastAPI web interface for simple user authentication and file operations
+- **Engine**: C-based storage engine handling chunking, hashing, and block storage
+
+Communication between gateway and engine happens via UNIX domain sockets using a binary protocol.
+
+## Quick Start
+
+### 1. Build and Run Engine
+
+```bash
+cd c_engine
+make
+./c_engine /tmp/cengine.sock
+```
+
+The engine listens on the specified socket path (default: `/tmp/cengine.sock`).
+
+### 2. Run Gateway
+
+```bash
+cd gateway
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+## Project Structure
+
+```
+.
+├── c_engine/         # C storage engine
+│   ├── src/          # Source files
+│   ├── include/      # Header files
+│   └── deps/         # Dependencies (Blake3)
+├── gateway/          # FastAPI web gateway
+│   ├── core/         # Core modules (config, engine, users)
+│   ├── routers/      # API routes (auth, files, pages)
+│   ├── templates/    # HTML templates
+│   └── static/       # static files (CSS)
+└── Makefile          # Build commands
+```
+
+## Features
+
+- Content-addressed storage with Blake3 hashing
+- Chunk-based deduplication
+- User authentication and file ownership
+- Web interface for upload/download
+- Multi-threaded engine for concurrent operations
+- UNIX socket IPC between gateway and engine
