@@ -1,4 +1,4 @@
-.PHONY: help up down clean
+.PHONY: help up down logs logs-engine logs-gateway clean
 
 help:
 	@echo 'Usage: make [target]'
@@ -9,6 +9,15 @@ up:
 
 down:
 	sudo docker-compose down
+
+logs:
+	sudo docker-compose logs -f
+
+logs-engine:
+	sudo docker-compose logs -f engine
+
+logs-gateway:
+	sudo docker-compose logs -f gateway
 
 clean:
 	cd engine && $(MAKE) clean
