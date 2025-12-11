@@ -2,48 +2,40 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
+*.pyo
 *.so
 .Python
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
 *.egg
 .venv/
 venv/
 env/
 ENV/
-*.mp3
-*.mp4
-/c_engine/upload_test_files/
-# Testing
 .pytest_cache/
 .coverage
 htmlcov/
-.tox/
-.hypothesis/
+.installed
 
-# C/C++
-build/
+# C/C++ Build Artifacts
 *.o
 *.out
 *.obj
 *.exe
+*.a
+c_engine/c_engine
+c_engine/src/*.o
+c_engine/deps/**/*.o
 
-# Local data (do not commit)
-storage/chunks/*
-storage/manifests/*
-!storage/chunks/.gitkeep
-!storage/manifests/.gitkeep
+# C Engine Runtime Data
+c_engine/blocks/
+c_engine/manifests/
+c_engine/owners/
+
+# Gateway Runtime Data
+gateway/data/
+gateway/venv/
+gateway/.venv/
 
 # IDE / OS
 .vscode/
@@ -57,13 +49,9 @@ Thumbs.db
 # Logs
 *.log
 
-# Environment variables
+# Environment
 .env
 .env.*
+
+# Docs (optional)
 *.pdf
-
-/c_engine/download_files/
-/c_engine/manifests/
-/c_engine/blocks/
-/c_engine/tests/
-
