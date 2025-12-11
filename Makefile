@@ -1,4 +1,4 @@
-.PHONY: help up down logs logs-engine logs-gateway clean
+.PHONY: help up down logs logs-engine logs-gateway clean reset
 
 help:
 	@echo 'Usage: make [target]'
@@ -18,6 +18,10 @@ logs-engine:
 
 logs-gateway:
 	sudo docker-compose logs -f gateway
+
+reset:
+	sudo docker-compose down -v
+	@echo "all containers stopped and volumes removed"
 
 clean:
 	cd engine && $(MAKE) clean
