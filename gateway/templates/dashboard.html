@@ -1,0 +1,48 @@
+{% extends "base.html" %} {% block header %}
+<h1>Your files</h1>
+<p class="subtitle">Upload new content or download by CID.</p>
+{% endblock %} {% block content %} {% if message %}
+<div class="alert alert-success">{{ message }} {% if cid %}<br /><strong>CID:</strong> <code class="code">{{ cid }}</code>{% endif %}</div>
+{% endif %} {% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %}
+
+<section class="card">
+  <h2>Upload</h2>
+  <form class="form" method="post" action="/upload" enctype="multipart/form-data">
+    <label class="file-input">
+      <span>Select file</span>
+      <input type="file" name="file" required />
+    </label>
+    <div class="form-actions">
+      <button class="btn" type="submit">Upload to engine</button>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>My Files</h2>
+  {% if files|length == 0 %}
+  <p class="muted">No files uploaded yet.</p>
+  {% else %}
+  <div class="table">
+    <div class="table-row table-head">
+      <span>CID</span>
+      <span>Filename</span>
+      <span>Size</span>
+      <span>Actions</span>
+    </div>
+    {% for file in files %}
+    <div class="table-row">
+      <span class="code">{{ file.cid }}</span>
+      <span>{{ file.filename }}</span>
+      <span>{% if file.size %}{{ file.size }} bytes{% else %}-{% endif %}</span>
+      <span>
+        <a class="btn btn-small" href="/download/{{ file.cid }}">Download</a>
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

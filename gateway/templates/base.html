@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>IPFS Gateway</title>
+    <link rel="stylesheet" href="/static/css/style.css" />
+  </head>
+  <body>
+    <nav class="topbar">
+      <div class="nav-left">
+        <a href="/" class="brand">IPFS Gateway</a>
+        <a href="/docs" class="nav-link">Docs</a>
+        {% if user %}
+        <a href="/dashboard" class="nav-link">Dashboard</a>
+        {% endif %}
+      </div>
+      <div class="nav-right">
+        {% if user %}
+        <span class="nav-user">Signed in as {{ user }}</span>
+        <a href="/logout" class="btn btn-ghost">Logout</a>
+        {% else %}
+        <a href="/signin" class="btn btn-light">Sign In</a>
+        <a href="/signup" class="btn btn-light">Sign Up</a>
+        {% endif %}
+      </div>
+    </nav>
+
+    <div class="container">
+      <header>
+        {% block header %}{% endblock %}
+      </header>
+      <main class="{% block main_class %}{% endblock %}">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+
+    <footer>
+      <p>Made with ❤️ by Amir & Arman</p>
+    </footer>
+  </body>
+</html>
+

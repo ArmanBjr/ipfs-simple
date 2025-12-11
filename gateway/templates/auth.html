@@ -1,0 +1,34 @@
+{% extends "base.html" %} {% block header %}
+<h1>{% if mode == "signup" %}Sign up{% else %}Sign in{% endif %}</h1>
+<p class="subtitle">{% if mode == "signup" %}Create an account{% else %}Sign in to your account{% endif %}</p>
+{% endblock %} {% block content %} {% if error %}
+<div class="alert alert-error">{{ error }}</div>
+{% endif %} {% if mode == "signup" %}
+<form class="form" method="post" action="/signup">
+  <label>
+    Username
+    <input type="text" name="username" required />
+  </label>
+  <label>
+    Password
+    <input type="password" name="password" required />
+  </label>
+  <div class="form-actions centered">
+    <button class="btn" type="submit">Sign up</button>
+  </div>
+</form>
+{% else %}
+<form class="form" method="post" action="/signin">
+  <label>
+    Username
+    <input type="text" name="username" required />
+  </label>
+  <label>
+    Password
+    <input type="password" name="password" required />
+  </label>
+  <div class="form-actions centered">
+    <button class="btn" type="submit">Sign in</button>
+  </div>
+</form>
+{% endif %} {% endblock %}
