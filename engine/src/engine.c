@@ -440,7 +440,8 @@ void handle_connection(int cfd) {
             }
 
             if (!close_conn) {
-                if (send_frame(cfd, OP_DOWNLOAD_DONE, NULL, 0) < 0) {
+                const char* filename = down->manifest->filename ? down->manifest->filename : "download";
+                if (send_frame(cfd, OP_DOWNLOAD_DONE, filename, (uint32_t)strlen(filename)) < 0) {
                     fprintf(stderr,
                             "[ERROR] [ENGINE] send_frame(OP_DOWNLOAD_DONE) failed\n");
                     close_conn = 1;
