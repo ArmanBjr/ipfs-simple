@@ -2,8 +2,8 @@
 
 {% block header %}
 <div class="docs-header">
-  <h1>Gateway Documentation</h1>
-  <p class="subtitle">Protocol notes and request flow for the FastAPI gateway.</p>
+  <h1>Project Documentation</h1>
+  <p class="subtitle">Content-Addressed File Storage System - How Everything Works</p>
 </div>
 {% endblock %}
 
@@ -12,52 +12,478 @@
   <nav class="sidebar">
     <h3>Contents</h3>
     <ul>
-      <li><a href="#overview">Overview</a></li>
+      <li><a href="#intro">Introduction</a></li>
+      <li><a href="#architecture">Architecture</a></li>
+      <li><a href="#engine">C Engine</a></li>
+      <li><a href="#gateway">Python Gateway</a></li>
+      <li><a href="#protocol">Communication Protocol</a></li>
+      <li><a href="#storage">Storage & Hashing</a></li>
+      <li><a href="#concurrency">Concurrency Model</a></li>
       <li><a href="#auth">Authentication</a></li>
-      <li><a href="#upload">Upload Flow</a></li>
-      <li><a href="#download">Download Flow</a></li>
+      <li><a href="#tools">Tools & Technologies</a></li>
+      <li><a href="#setup">Setup & Running</a></li>
     </ul>
   </nav>
   <main class="content">
-    <section id="overview">
-      <h2>Overview</h2>
+    <section id="intro">
+      <h2>Introduction</h2>
       <p>
-        The FastAPI gateway is a thin layer that forwards upload/download requests to the
-        C engine over a Unix domain socket at <code>/tmp/cengine.sock</code>. Files are chunked and
-        hashed inside the engine; the gateway only streams bytes and renders HTML.
+        This project is a content-addressed file storage system inspired by IPFS. Instead of storing files by name,
+        we store them by their content hash (CID). If you upload the same file twice, it only gets stored once
+        due to automatic deduplication.
+      </p>
+      <p>
+        The system has two main components: a C engine that handles the core storage operations (hashing, chunking, verification),
+        and a Python web gateway that provides the HTTP interface and user authentication.
+      </p>
+    </section>
+
+    <section id="architecture">
+      <h2>Architecture Overview</h2>
+      <p>
+        We split the project into two separate components that talk to each other through a Unix socket:
+      </p>
+      <h3>The Two Components</h3>
+      <ul>
+        <li><strong>C Engine</strong> - Does all the real work: splits files into chunks, hashes them with BLAKE3,
+            stores them on disk, verifies integrity, and handles parallel processing with threads</li>
+        <li><strong>Python Gateway</strong> - Runs the web server, manages user sessions, and forwards requests to the engine</li>
+      </ul>
+      <p>
+        They communicate through <code>/tmp/engine.sock</code> using a custom binary protocol. We chose Unix sockets
+        for local IPC because they have lower overhead than TCP/IP for same-host communication.
+      </p>
+      <h3>Why This Split?</h3>
+      <p>
+        We could've written everything in one language, but splitting it up has several advantages:
+      </p>
+      <ul>
+        <li>C provides better performance for CPU-intensive operations like hashing and file I/O</li>
+        <li>Python simplifies web development and HTTP request handling</li>
+        <li>The engine can be reused by other clients, not just the web gateway</li>
+        <li>We can restart one component without affecting the other</li>
+      </ul>
+    </section>
+
+    <section id="engine">
+      <h2>C Engine</h2>
+      <p>
+        The engine is written in C and handles all file storage operations, including chunking, hashing, and data persistence.
+      </p>
+      
+      <h3>What It Does</h3>
+      <ul>
+        <li>Listens on a Unix socket for incoming connections</li>
+        <li>Splits uploaded files into 256KB chunks</li>
+        <li>Computes BLAKE3 hash for each chunk</li>
+        <li>Stores chunks in a content-addressed manner (deduplication happens automatically)</li>
+        <li>Creates manifest files that list all chunks for a file</li>
+        <li>Verifies chunk integrity during downloads</li>
+        <li>Handles multiple connections simultaneously using a thread pool</li>
+      </ul>
+
+      <h3>File Organization</h3>
+      <p>The engine organizes files into three main directories:</p>
+      <ul>
+        <li><code>blocks/</code> - Actual chunk data, organized as <code>blocks/aa/bb/hash</code> for fast lookup</li>
+        <li><code>manifests/</code> - JSON files that map CIDs to their chunks</li>
+        <li><code>owners/</code> - Tracks which user owns which file (for access control)</li>
+      </ul>
+
+      <h3>Key Modules</h3>
+      <p>The engine code is split into logical modules:</p>
+      <ul>
+        <li><code>engine.c</code> - Main loop, socket handling, connection management</li>
+        <li><code>protocol.c</code> - Binary protocol frame encoding/decoding</li>
+        <li><code>upload.c</code> - Upload logic, streaming, chunking</li>
+        <li><code>download.c</code> - Download logic, chunk assembly</li>
+        <li><code>blockstore.c</code> - Chunk storage with sharding and atomic writes</li>
+        <li><code>hash.c</code> - BLAKE3 hashing and CID generation</li>
+        <li><code>manifest.c</code> - Manifest creation, serialization, parsing</li>
+        <li><code>threadpool.c</code> - Thread pool for parallel chunk processing</li>
+        <li><code>locks.c</code> - Read-write locks for thread safety</li>
+        <li><code>util.c</code> - Helper functions (path joining, recursive mkdir, logging)</li>
+      </ul>
+    </section>
+
+    <section id="gateway">
+      <h2>Python Gateway</h2>
+      <p>
+        The gateway is a FastAPI web application that provides the HTTP interface.
+        It handles user authentication, HTTP requests, and forwards storage operations to the engine via socket.
+      </p>
+
+      <h3>Main Responsibilities</h3>
+      <ul>
+        <li>Serve the web interface (HTML pages)</li>
+        <li>Handle user authentication (signup, signin, sessions)</li>
+        <li>Accept file uploads from the browser</li>
+        <li>Forward upload/download requests to the engine via socket</li>
+        <li>Stream responses back to the user</li>
+      </ul>
+
+      <h3>Code Structure</h3>
+      <ul>
+        <li><code>main.py</code> - FastAPI app setup, middleware, route registration</li>
+        <li><code>core/config.py</code> - Configuration (socket path, chunk size, etc.)</li>
+        <li><code>core/engine.py</code> - Socket client that talks to the C engine</li>
+        <li><code>core/users.py</code> - User management, password hashing, session handling</li>
+        <li><code>routers/auth.py</code> - Signup/signin endpoints</li>
+        <li><code>routers/files.py</code> - Upload/download/list file endpoints</li>
+        <li><code>routers/pages.py</code> - HTML page rendering</li>
+        <li><code>templates/</code> - Jinja2 HTML templates</li>
+        <li><code>static/</code> - CSS stylesheets</li>
+      </ul>
+
+      <h3>How It Works</h3>
+      <p>
+        When you upload a file through the browser, here's what happens:
+      </p>
+      <ol>
+        <li>Browser sends file to gateway via HTTP POST</li>
+        <li>Gateway reads the entire file into memory (for simplicity)</li>
+        <li>Gateway opens a socket connection to the engine</li>
+        <li>Sends AUTH message with your token</li>
+        <li>Sends UPLOAD_START with filename and total size</li>
+        <li>Splits file into chunks and sends each with UPLOAD_CHUNK</li>
+        <li>Sends UPLOAD_FINISH to signal completion</li>
+        <li>Waits for UPLOAD_DONE response containing the CID</li>
+        <li>Redirects you to dashboard with success message</li>
+      </ol>
+    </section>
+
+    <section id="protocol">
+      <h2>Communication Protocol</h2>
+      <p>
+        The gateway and engine communicate using a simple binary protocol. Each message is called a "frame" and has this structure:
+      </p>
+      <pre><code>[1 byte opcode][4 bytes length][N bytes payload]</code></pre>
+      <p>
+        The length field is in big-endian format (network byte order).
+      </p>
+
+      <h3>Operation Codes</h3>
+      <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+        <tr style="background: #f5f5f5;">
+          <th style="padding: 10px; text-align: left;">Opcode</th>
+          <th style="padding: 10px; text-align: left;">Name</th>
+          <th style="padding: 10px; text-align: left;">Direction</th>
+          <th style="padding: 10px; text-align: left;">Purpose</th>
+        </tr>
+        <tr>
+          <td style="padding: 8px;"><code>0x05</code></td>
+          <td style="padding: 8px;">AUTH</td>
+          <td style="padding: 8px;">Gateway → Engine</td>
+          <td style="padding: 8px;">Send authentication token</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px;"><code>0x01</code></td>
+          <td style="padding: 8px;">UPLOAD_START</td>
+          <td style="padding: 8px;">Gateway → Engine</td>
+          <td style="padding: 8px;">Begin upload, send filename + size</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px;"><code>0x02</code></td>
+          <td style="padding: 8px;">UPLOAD_CHUNK</td>
+          <td style="padding: 8px;">Gateway → Engine</td>
+          <td style="padding: 8px;">Send file data chunk</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px;"><code>0x03</code></td>
+          <td style="padding: 8px;">UPLOAD_FINISH</td>
+          <td style="padding: 8px;">Gateway → Engine</td>
+          <td style="padding: 8px;">Signal end of upload</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px;"><code>0x81</code></td>
+          <td style="padding: 8px;">UPLOAD_DONE</td>
+          <td style="padding: 8px;">Engine → Gateway</td>
+          <td style="padding: 8px;">Return CID or error</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px;"><code>0x11</code></td>
+          <td style="padding: 8px;">DOWNLOAD_START</td>
+          <td style="padding: 8px;">Gateway → Engine</td>
+          <td style="padding: 8px;">Request download by CID</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px;"><code>0x91</code></td>
+          <td style="padding: 8px;">DOWNLOAD_CHUNK</td>
+          <td style="padding: 8px;">Engine → Gateway</td>
+          <td style="padding: 8px;">Send chunk data</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px;"><code>0x92</code></td>
+          <td style="padding: 8px;">DOWNLOAD_DONE</td>
+          <td style="padding: 8px;">Engine → Gateway</td>
+          <td style="padding: 8px;">End of download, send filename</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px;"><code>0x30</code></td>
+          <td style="padding: 8px;">LIST_FILES</td>
+          <td style="padding: 8px;">Gateway → Engine</td>
+          <td style="padding: 8px;">Request user's file list</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px;"><code>0xB0</code></td>
+          <td style="padding: 8px;">LIST_RESPONSE</td>
+          <td style="padding: 8px;">Engine → Gateway</td>
+          <td style="padding: 8px;">Return JSON array of files</td>
+        </tr>
+      </table>
+
+      <h3>Example: Upload Sequence</h3>
+      <pre><code>Gateway → Engine: [0x05][len][auth_token]
+Gateway → Engine: [0x01][len][total_size + filename]
+Gateway → Engine: [0x02][len][chunk_data]
+Gateway → Engine: [0x02][len][chunk_data]
+...
+Gateway → Engine: [0x03][0][]
+Engine → Gateway: [0x81][len][cid_string]</code></pre>
+    </section>
+
+    <section id="storage">
+      <h2>Storage & Hashing</h2>
+      <p>
+        This is where content-addressing comes into play. Instead of storing files by name, we store them by content hash.
+      </p>
+
+      <h3>Chunking Strategy</h3>
+      <p>
+        Files are split into 256KB chunks. This size is a good balance - small enough for parallel processing and
+        deduplication, large enough to avoid too many small files.
+      </p>
+
+      <h3>BLAKE3 Hashing</h3>
+      <p>
+        We use BLAKE3 for hashing because:
+      </p>
+      <ul>
+        <li>High performance (faster than MD5, SHA-1, SHA-2, SHA-3)</li>
+        <li>Cryptographically secure</li>
+        <li>Supports parallel hashing</li>
+        <li>Produces 256-bit (32-byte) hashes</li>
+      </ul>
+
+      <h3>CID Generation</h3>
+      <p>
+        After all chunks are stored, we create a manifest JSON file that lists them. Then we hash the manifest
+        itself to get the CID (Content Identifier). The CID format is:
+      </p>
+      <pre><code>CID = multibase(base32) · multicodec(manifest) · multihash(BLAKE3(manifest))</code></pre>
+      <p>
+        This gives us strings like: <code>boepcamxabvm3lbqxn2sm2hc5ejocjufanoddx3cemx7cl3deqou5upj7</code>
+      </p>
+
+      <h3>Block Sharding</h3>
+      <p>
+        To avoid having millions of files in one directory (which is slow), we use a two-level sharding scheme:
+      </p>
+      <pre><code>blocks/aa/bb/boepcamxabvm3lbqxn2sm2hc5ejocjufanoddx3cemx7cl3deqou5upj7</code></pre>
+      <p>
+        Where 'aa' and 'bb' are the first four characters of the hash. This distributes files evenly across directories.
+      </p>
+
+      <h3>Atomic Writes</h3>
+      <p>
+        To prevent corruption if the system crashes during a write, we use atomic writes:
+      </p>
+      <ol>
+        <li>Write data to a temporary file: <code>hash.tmp.12345</code></li>
+        <li>Call <code>fsync()</code> to flush to disk</li>
+        <li>Atomically rename to final name: <code>rename(temp, final)</code></li>
+      </ol>
+      <p>
+        If we crash, either the old file exists or the new one does - never a half-written file.
+      </p>
+
+      <h3>Reference Counting</h3>
+      <p>
+        Since multiple files can share chunks (deduplication), we keep reference counts in <code>.ref</code> files.
+        When a manifest is created, we increment the refcount for each chunk. When deleted, we decrement them.
+        Only when refcount hits zero do we actually delete the chunk.
+      </p>
+    </section>
+
+    <section id="concurrency">
+      <h2>Concurrency Model</h2>
+      <p>
+        The system uses both processes and threads to handle multiple operations simultaneously.
+      </p>
+
+      <h3>Process-Level Concurrency</h3>
+      <p>
+        Each connection to the engine runs in its own context. The main thread accepts connections and hands them off
+        to the thread pool. This means multiple users can upload/download at the same time without blocking each other.
+      </p>
+
+      <h3>Thread Pool</h3>
+      <p>
+        The engine uses a thread pool (default: number of CPU cores) to process chunks in parallel.
+        Upload flow:
+      </p>
+      <ol>
+        <li>Main connection thread receives chunks from gateway</li>
+        <li>Each complete chunk is submitted to the thread pool as a job</li>
+        <li>Worker threads hash and store chunks in parallel</li>
+        <li>Results are collected in order and committed to the manifest</li>
+      </ol>
+      <p>
+        This allows all chunks of a file to be processed concurrently, limited only by the available CPU cores.
+      </p>
+
+      <h3>Thread Safety</h3>
+      <p>
+        To prevent race conditions, we use read-write locks (pthread_rwlock):
+      </p>
+      <ul>
+        <li><strong>Blockstore lock</strong> - Protects chunk files. Multiple readers, single writer.</li>
+        <li><strong>Manifest lock</strong> - Protects manifest files. Multiple readers, single writer.</li>
+      </ul>
+      <p>
+        We also use mutex + condition variables for the upload commit phase to ensure chunks are added to the
+        manifest in the correct order, even though they're processed in parallel.
       </p>
     </section>
 
     <section id="auth">
-      <h2>Authentication</h2>
+      <h2>Authentication & Ownership</h2>
       <p>
-        Users are stored locally in <code>users.json</code>. When you sign in, the gateway derives
-        an engine token (<code>owner-&lt;sha256(username:password)&gt;</code>) and sends it with every
-        engine connection using opcode <code>0x05 (AUTH)</code>. Owner files written by the engine
-        under <code>owners/</code> are matched with this token to list your files.
+        The system has two layers of authentication:
       </p>
+
+      <h3>Gateway Authentication</h3>
+      <p>
+        Users sign up with username + password. The gateway stores these in <code>data/users.json</code> with
+        passwords hashed using SHA-256. Sessions are managed with signed cookies.
+      </p>
+
+      <h3>Engine Authentication</h3>
+      <p>
+        The gateway never sends your actual password to the engine. Instead, it derives an "owner token":
+      </p>
+      <pre><code>owner_token = "owner-" + SHA256(username + ":" + password)</code></pre>
+      <p>
+        This token is sent with every engine request. When you upload a file, the engine saves your token in
+        <code>owners/CID.owner</code>. This way:
+      </p>
+      <ul>
+        <li>Only you can see your files in the file list</li>
+        <li>Only you can download your files (if they have an owner)</li>
+        <li>Only you can delete your files</li>
+        <li>Files without an owner are "public" (accessible to anyone who knows the CID)</li>
+      </ul>
     </section>
 
-    <section id="upload">
-      <h2>Upload Flow</h2>
+    <section id="tools">
+      <h2>Tools & Technologies</h2>
       <p>
-        The browser posts your file to the gateway, which opens a Unix socket and performs:
+        Here's everything we used to build this project:
       </p>
+
+      <h3>Backend (C Engine)</h3>
+      <ul>
+        <li><strong>GCC 12</strong> - C compiler</li>
+        <li><strong>BLAKE3</strong> - Cryptographic hash function (official C implementation)</li>
+        <li><strong>POSIX Threads</strong> - pthread library for threading</li>
+        <li><strong>Unix Sockets</strong> - AF_UNIX for IPC</li>
+        <li><strong>Make</strong> - Build system</li>
+      </ul>
+
+      <h3>Backend (Python Gateway)</h3>
+      <ul>
+        <li><strong>Python 3.12</strong> - Programming language</li>
+        <li><strong>FastAPI</strong> - Modern web framework</li>
+        <li><strong>Uvicorn</strong> - ASGI server</li>
+        <li><strong>Jinja2</strong> - HTML templating</li>
+        <li><strong>Starlette</strong> - Session middleware</li>
+      </ul>
+
+      <h3>Deployment</h3>
+      <ul>
+        <li><strong>Docker</strong> - Containerization</li>
+        <li><strong>Docker Compose</strong> - Multi-container orchestration</li>
+      </ul>
+
+      <h3>Development Tools</h3>
+      <ul>
+        <li><strong>Git</strong> - Version control</li>
+        <li><strong>Make</strong> - Task automation</li>
+        <li><strong>curl/httpx</strong> - Testing HTTP endpoints</li>
+      </ul>
+    </section>
+
+    <section id="setup">
+      <h2>Setup & Running</h2>
+      
+      <h3>Prerequisites</h3>
+      <ul>
+        <li>Docker and Docker Compose installed</li>
+        <li>Or: GCC, Make, Python 3.12+ for local development</li>
+      </ul>
+
+      <h3>Quick Start with Docker</h3>
+      <pre><code>make up         # Build and start everything
+make logs       # Watch logs from both services
+make down       # Stop services (keeps data)
+make reset      # Stop and delete all data</code></pre>
+
+      <h3>Local Development</h3>
+      <p><strong>Terminal 1 - Engine:</strong></p>
+      <pre><code>cd engine
+make
+./engine /tmp/engine.sock</code></pre>
+
+      <p><strong>Terminal 2 - Gateway:</strong></p>
+      <pre><code>cd gateway
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --reload --host 0.0.0.0 --port 8000</code></pre>
+
+      <p>Then open <code>http://localhost:8000</code> in your browser.</p>
+
+      <h3>Project Structure</h3>
+      <pre><code>├── engine/              # C storage engine
+│   ├── src/             # Source files (.c)
+│   ├── include/         # Header files (.h)
+│   ├── deps/blake3/     # BLAKE3 library
+│   ├── Makefile         # Build configuration
+│   ├── Dockerfile       # Container definition
+│   ├── blocks/          # Chunk storage (created at runtime)
+│   ├── manifests/       # Manifest files (created at runtime)
+│   └── owners/          # Owner files (created at runtime)
+├── gateway/             # Python web gateway
+│   ├── core/            # Core modules
+│   ├── routers/         # HTTP route handlers
+│   ├── static/          # CSS files
+│   ├── templates/       # HTML templates
+│   ├── data/            # User database (created at runtime)
+│   ├── requirements.txt # Python dependencies
+│   └── Dockerfile       # Container definition
+├── docker-compose.yml   # Multi-container setup
+└── Makefile             # Convenience commands</code></pre>
+
+      <h3>Testing</h3>
       <ol>
-        <li>Send <code>AUTH</code> with your token</li>
-        <li>Send <code>UPLOAD_START</code> containing total size + filename</li>
-        <li>Stream chunks with <code>UPLOAD_CHUNK</code></li>
-        <li>Signal completion with <code>UPLOAD_FINISH</code></li>
-        <li>Wait for <code>UPLOAD_DONE</code> carrying the resulting CID</li>
+        <li>Start the services: <code>make up</code></li>
+        <li>Open <code>http://localhost:8000</code></li>
+        <li>Create an account via "Sign Up"</li>
+        <li>Upload a file from the dashboard</li>
+        <li>Copy the returned CID and test download</li>
+        <li>Upload the same file again to verify deduplication (should be instant)</li>
       </ol>
     </section>
 
-    <section id="download">
-      <h2>Download Flow</h2>
+    <section style="margin-top: 40px; padding: 20px; background: #f5f5f5; border-radius: 8px;">
+      <h3>Summary</h3>
       <p>
-        For downloads the gateway sends <code>DOWNLOAD_START</code> with the CID, relays each
-        <code>DOWNLOAD_CHUNK</code> back to the browser, and finishes on <code>DOWNLOAD_DONE</code>.
-        Filenames are resolved from the manifest in <code>manifests/&lt;cid&gt;.json</code> when present.
+        This documentation covers the main aspects of the project architecture and implementation.
+        The flow is: gateway receives HTTP requests, communicates with engine via Unix socket, engine processes
+        chunks using worker threads, stores data by content hash, and returns CIDs.
+      </p>
+      <p>
+        For implementation details, refer to the source code in the repository.
       </p>
     </section>
   </main>
