@@ -1,5 +1,3 @@
-// src/upload.c
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,8 +11,8 @@
 #include "blockstore.h"
 #include <pthread.h>
 #include "threadpool.h"
-#include <unistd.h>     
-#include "util.h"       
+#include <unistd.h>
+#include "util.h"
 #include "protocol.h"
 
 upload_ctx* upload_ctx_create(void) {
@@ -24,14 +22,12 @@ upload_ctx* upload_ctx_create(void) {
         return NULL;
     }
 
-    // Initialize basic fields
-    ctx->filename         = NULL;
-    ctx->total_size       = 0;
-    ctx->chunk_size       = ENGINE_CHUNK_SIZE;
+    ctx->filename = NULL;
+    ctx->total_size = 0;
+    ctx->chunk_size = ENGINE_CHUNK_SIZE;
     ctx->next_chunk_index = 0;
-    ctx->manifest         = NULL;
+    ctx->manifest = NULL;
 
-    // Initialize streaming buffer
     ctx->buffer_len = 0;
     ctx->buffer = (uint8_t*)malloc(ctx->chunk_size);
     if (!ctx->buffer) {
@@ -40,11 +36,10 @@ upload_ctx* upload_ctx_create(void) {
         return NULL;
     }
 
-    // Initialize commit-layer state (used by threaded upload mode).
     ctx->next_submit_index = 0;
     ctx->next_commit_index = 0;
-    ctx->results           = NULL;
-    ctx->results_capacity  = 0;
+    ctx->results = NULL;
+    ctx->results_capacity = 0;
 
     if (pthread_mutex_init(&ctx->commit_mutex, NULL) != 0) {
         fprintf(stderr, "[UPLOAD] ERROR: pthread_mutex_init(commit_mutex) failed\n");
@@ -75,25 +70,21 @@ void upload_ctx_destroy(upload_ctx* ctx) {
 
     fprintf(stderr, "[UPLOAD] upload_ctx_destroy called\n");
 
-    // Free filename
     if (ctx->filename) {
         free(ctx->filename);
         ctx->filename = NULL;
     }
 
-    // Free manifest (if allocated)
     if (ctx->manifest) {
         manifest_free(ctx->manifest);
         ctx->manifest = NULL;
     }
 
-    // Free streaming buffer
     if (ctx->buffer) {
         free(ctx->buffer);
         ctx->buffer = NULL;
     }
 
-    // Free per-chunk results (if any)
     if (ctx->results) {
         for (uint32_t i = 0; i < ctx->results_capacity; ++i) {
             if (ctx->results[i].hash_str) {
@@ -106,7 +97,6 @@ void upload_ctx_destroy(upload_ctx* ctx) {
         ctx->results_capacity = 0;
     }
 
-    // Destroy synchronization primitives
     pthread_mutex_destroy(&ctx->commit_mutex);
     pthread_cond_destroy(&ctx->commit_cond);
 
@@ -120,11 +110,8 @@ void upload_ctx_destroy(upload_ctx* ctx) {
         ctx->upload_id = NULL;
     }
 
-
     free(ctx);
 }
-
-
 
 int upload_handle_start(upload_ctx* ctx, const uint8_t* payload, uint32_t len) {
     if (!ctx) {
@@ -132,34 +119,27 @@ int upload_handle_start(upload_ctx* ctx, const uint8_t* payload, uint32_t len) {
         return -1;
     }
 
-    // Prevent multiple START on the same context.
     if (ctx->filename != NULL || ctx->manifest != NULL) {
         fprintf(stderr, "[UPLOAD] ERROR: UPLOAD_START called twice on the same context\n");
         return -1;
     }
 
-    // Payload format:
-    // [0..7]   : total_size (uint64_t, big-endian, as declared by client)
-    // [8..len) : filename bytes (not null-terminated)
     if (!payload || len < 8) {
         fprintf(stderr, "[UPLOAD] ERROR: UPLOAD_START payload too short (len=%u)\n", len);
         return -1;
     }
 
-    // Parse total_size from big-endian bytes
     uint64_t declared_total_size = 0;
     for (int i = 0; i < 8; i++) {
         declared_total_size = (declared_total_size << 8) | (uint64_t)payload[i];
     }
 
     ctx->declared_total_size = declared_total_size;
-    ctx->total_size          = 0;  
-
+    ctx->total_size = 0;
 
     const uint8_t* fname_bytes = payload + 8;
     uint32_t fname_len = len - 8;
 
-    // Parse filename (if any)
     if (fname_len > 0) {
         ctx->filename = (char*)malloc((size_t)fname_len + 1);
         if (!ctx->filename) {
@@ -169,7 +149,6 @@ int upload_handle_start(upload_ctx* ctx, const uint8_t* payload, uint32_t len) {
         memcpy(ctx->filename, fname_bytes, fname_len);
         ctx->filename[fname_len] = '\0';
     } else {
-        // Fallback if no filename is provided.
         ctx->filename = strdup("unnamed");
         if (!ctx->filename) {
             fprintf(stderr, "[UPLOAD] ERROR: failed to allocate default filename\n");
@@ -177,19 +156,15 @@ int upload_handle_start(upload_ctx* ctx, const uint8_t* payload, uint32_t len) {
         }
     }
 
-    // Initialize upload state for a fresh upload.
-    // total_size will be accumulated from processed chunks.
-    ctx->total_size       = 0;
+    ctx->total_size = 0;
     ctx->next_chunk_index = 0;
-    ctx->buffer_len       = 0;  // streaming buffer is empty at start
+    ctx->buffer_len = 0;
 
-    // Create manifest for this upload (hash_algo = "blake3" for now).
     ctx->manifest = manifest_create(ctx->filename, ctx->chunk_size, "blake3");
     if (ctx->auth_token) {
         ctx->manifest->auth_token = strdup(ctx->auth_token);
     }
 
-    
     if (!ctx->manifest) {
         fprintf(stderr, "[UPLOAD] ERROR: manifest_create failed\n");
         return -1;
@@ -201,10 +176,8 @@ int upload_handle_start(upload_ctx* ctx, const uint8_t* payload, uint32_t len) {
             (unsigned long long)declared_total_size,
             ctx->chunk_size);
 
-
     ctx->declared_total_size = declared_total_size;
 
-    // Generate upload_id from filename + timestamp
     char buf[256];
     snprintf(buf, sizeof(buf), "%s-%ld", ctx->filename ? ctx->filename : "file", time(NULL));
     ctx->upload_id = strdup(buf);
@@ -212,74 +185,6 @@ int upload_handle_start(upload_ctx* ctx, const uint8_t* payload, uint32_t len) {
     return 0;
 }
 
-
-// // Process a single, full chunk of data.
-// // - compute content hash
-// // - convert to multihash (base32 string)
-// // - store block in the blockstore
-// // - append chunk entry to the manifest
-// static int upload_process_full_chunk(upload_ctx* ctx, const uint8_t* data, uint32_t len) {
-//     if (!ctx || !data || len == 0) {
-//         fprintf(stderr, "[UPLOAD] ERROR: upload_process_full_chunk: invalid arguments\n");
-//         return -1;
-//     }
-//     if (!ctx->manifest) {
-//         fprintf(stderr, "[UPLOAD] ERROR: upload_process_full_chunk: manifest is NULL\n");
-//         return -1;
-//     }
-
-//     hash_algo_t algo = hash_algo_from_env();
-//     hash_result_t h;
-//     memset(&h, 0, sizeof(h));
-
-//     if (hash_compute(algo, data, (size_t)len, &h) < 0) {
-//         fprintf(stderr, "[UPLOAD] ERROR: failed to compute chunk hash\n");
-//         return -1;
-//     }
-
-//     char* mh_str = NULL;
-//     if (hash_to_multihash_b32(&h, &mh_str) < 0 || !mh_str) {
-//         fprintf(stderr, "[UPLOAD] ERROR: failed to convert hash to multihash base32\n");
-//         hash_result_free(&h);
-//         return -1;
-//     }
-
-//     // Store the block in the blockstore (deduplicated inside blockstore_put).
-//     if (blockstore_put(mh_str, data, (size_t)len) < 0) {
-//         fprintf(stderr, "[UPLOAD] ERROR: blockstore_put failed for chunk %u\n", ctx->next_chunk_index);
-//         hash_result_free(&h);
-//         free(mh_str);
-//         return -1;
-//     }
-
-//     // Record this chunk in the manifest.
-//     if (manifest_add_chunk(ctx->manifest, ctx->next_chunk_index, len, mh_str) < 0) {
-//         fprintf(stderr, "[UPLOAD] ERROR: manifest_add_chunk failed for chunk %u\n", ctx->next_chunk_index);
-//         hash_result_free(&h);
-//         free(mh_str);
-//         return -1;
-//     }
-
-//     // Update counters: we still keep total_size as "bytes actually chunked".
-//     ctx->total_size      += (uint64_t)len;
-//     ctx->next_chunk_index++;
-
-//     hash_result_free(&h);
-//     free(mh_str);
-
-//     fprintf(stderr,
-//         "[UPLOAD] processed full chunk index=%u, size=%u (total_size=%" PRIu64 ")\n",
-//         ctx->next_chunk_index - 1, len, ctx->total_size);
-
-//     return 0;
-// }
-
-// Worker-side function: process a single chunk job in a background thread.
-// - Compute the hash and convert it to a multihash string
-// - Store the block in the blockstore
-// - Record the result into ctx->results[index] under commit_mutex
-// - Signal commit_cond so the connection thread can commit in order
-// - Finally, free the job->data buffer and the job struct itself.
 void upload_chunk_job_run(upload_chunk_job_t* job) {
     if (!job) {
         fprintf(stderr, "[UPLOAD] ERROR: upload_chunk_job_run called with NULL job\n");
@@ -306,8 +211,7 @@ void upload_chunk_job_run(upload_chunk_job_t* job) {
         return;
     }
 
-    // 1) Compute hash over the chunk
-    hash_algo_t   algo = hash_algo_from_env();
+    hash_algo_t algo = hash_algo_from_env();
     hash_result_t h;
     memset(&h, 0, sizeof(h));
 
@@ -325,7 +229,6 @@ void upload_chunk_job_run(upload_chunk_job_t* job) {
         return;
     }
 
-    // 2) Store the block in the blockstore (deduplicated by blockstore_put)
     if (blockstore_put(mh_str, data, (size_t)len) < 0) {
         fprintf(stderr, "[UPLOAD] ERROR: upload_chunk_job_run: blockstore_put failed (index=%u)\n", index);
         hash_result_free(&h);
@@ -334,10 +237,8 @@ void upload_chunk_job_run(upload_chunk_job_t* job) {
         return;
     }
 
-    // 3) Record result in ctx->results[index] under commit_mutex
     pthread_mutex_lock(&ctx->commit_mutex);
 
-    // Ensure results array is large enough
     if (ctx->results_capacity <= index) {
         uint32_t new_cap = ctx->results_capacity ? ctx->results_capacity : 16;
         while (new_cap <= index) {
@@ -356,20 +257,18 @@ void upload_chunk_job_run(upload_chunk_job_t* job) {
             return;
         }
 
-        // Initialize newly added entries
         for (uint32_t i = ctx->results_capacity; i < new_cap; ++i) {
             new_arr[i].ready    = 0;
             new_arr[i].size     = 0;
             new_arr[i].hash_str = NULL;
         }
 
-        ctx->results          = new_arr;
+        ctx->results = new_arr;
         ctx->results_capacity = new_cap;
     }
 
     struct upload_chunk_result* r = &ctx->results[index];
 
-    // If there was any previous hash_str (should not happen in normal flow), free it.
     if (r->hash_str) {
         free(r->hash_str);
         r->hash_str = NULL;
@@ -379,17 +278,14 @@ void upload_chunk_job_run(upload_chunk_job_t* job) {
     r->hash_str = strdup(mh_str);
     if (!r->hash_str) {
         fprintf(stderr, "[UPLOAD] ERROR: upload_chunk_job_run: strdup(mh_str) failed (index=%u)\n", index);
-        // Leave ready=0 so commit side will not wait on this as "done".
         r->ready = 0;
     } else {
         r->ready = 1;
     }
 
-    // Wake up any thread waiting to commit chunks.
     pthread_cond_broadcast(&ctx->commit_cond);
     pthread_mutex_unlock(&ctx->commit_mutex);
 
-    // 4) آماده‌کردن preview برای لاگ قبل از آزاد کردن mh_str
     char hash_preview[16];
     hash_preview[0] = '\0';
     if (mh_str) {
@@ -408,11 +304,6 @@ void upload_chunk_job_run(upload_chunk_job_t* job) {
         (void*)ctx);
 }
 
-
-
-// High-level stream handler:
-// Accepts arbitrary-sized pieces of the upload stream, buffering until a full chunk is ready.
-// Once the buffer accumulates ctx->chunk_size bytes, it is submitted as a job to the thread pool.
 int upload_handle_stream_data(upload_ctx* ctx, const uint8_t* data, uint32_t len) {
     if (!ctx || !data) {
         fprintf(stderr, "[UPLOAD] ERROR: upload_handle_stream_data: invalid arguments\n");
@@ -423,7 +314,6 @@ int upload_handle_stream_data(upload_ctx* ctx, const uint8_t* data, uint32_t len
         return -1;
     }
     if (len == 0) {
-        // No data to process; not an error.
         return 0;
     }
 
@@ -437,37 +327,31 @@ int upload_handle_stream_data(upload_ctx* ctx, const uint8_t* data, uint32_t len
 
     while (remaining > 0) {
         uint32_t free_space = ctx->chunk_size - ctx->buffer_len;
-        uint32_t to_copy    = (remaining < free_space) ? remaining : free_space;
+        uint32_t to_copy = (remaining < free_space) ? remaining : free_space;
 
-        // Copy incoming data into the staging buffer.
         memcpy(ctx->buffer + ctx->buffer_len, p, to_copy);
         ctx->buffer_len += to_copy;
-        p               += to_copy;
-        remaining       -= to_copy;
+        p += to_copy;
+        remaining -= to_copy;
 
-        // When the buffer becomes a full chunk, submit it as a job to the thread pool.
         if (ctx->buffer_len == ctx->chunk_size) {
-            // Allocate an independent copy for the worker.
             uint8_t* chunk_copy = (uint8_t*)malloc(ctx->chunk_size);
             if (!chunk_copy) {
                 fprintf(stderr, "[UPLOAD] ERROR: upload_handle_stream_data: malloc(chunk_copy) failed\n");
-                ctx->buffer_len = 0;  // drop buffered data on error
+                ctx->buffer_len = 0;
                 return -1;
             }
             memcpy(chunk_copy, ctx->buffer, ctx->chunk_size);
 
-            // Assign a logical chunk index and submit job.
             uint32_t index = ctx->next_submit_index++;
             if (threadpool_submit_upload_chunk(ctx, chunk_copy, ctx->chunk_size, index) < 0) {
                 fprintf(stderr,
                         "[UPLOAD] ERROR: upload_handle_stream_data: threadpool_submit_upload_chunk failed (index=%u)\n",
                         index);
-                // threadpool_submit_upload_chunk already freed chunk_copy on failure.
                 ctx->buffer_len = 0;
                 return -1;
             }
 
-            // Reset buffer for the next chunk.
             ctx->buffer_len = 0;
         }
     }
@@ -475,10 +359,6 @@ int upload_handle_stream_data(upload_ctx* ctx, const uint8_t* data, uint32_t len
     return 0;
 }
 
-
-// Public entry point used by engine.c for each OP_UPLOAD_CHUNK frame.
-// This now treats the incoming frame as arbitrary stream data and lets
-// upload_handle_stream_data() take care of buffering and chunking.
 int upload_handle_chunk(upload_ctx* ctx, const uint8_t* data, uint32_t len) {
     if (!ctx || !data) {
         fprintf(stderr, "[UPLOAD] ERROR: upload_handle_chunk: invalid arguments\n");
@@ -514,7 +394,6 @@ int upload_handle_finish(upload_ctx* ctx, char** out_cid) {
         return -1;
     }
 
-    // If there is a final partial chunk in the buffer, submit it as a job.
     if (ctx->buffer && ctx->buffer_len > 0) {
         fprintf(stderr,
                 "[UPLOAD] finish: flushing final partial chunk as job (size=%u)\n",
@@ -532,22 +411,17 @@ int upload_handle_finish(upload_ctx* ctx, char** out_cid) {
             fprintf(stderr,
                     "[UPLOAD] ERROR: upload_handle_finish: threadpool_submit_upload_chunk failed for final chunk (index=%u)\n",
                     index);
-            // threadpool_submit_upload_chunk already freed tail_copy on failure.
             return -1;
         }
 
-        // Buffer is now logically consumed.
         ctx->buffer_len = 0;
     }
 
-    // At this point, all chunks 0..next_submit_index-1 have been submitted as jobs.
-    // Now we must wait until all of them are completed and commit them in order.
     pthread_mutex_lock(&ctx->commit_mutex);
 
     while (ctx->next_commit_index < ctx->next_submit_index) {
         uint32_t idx = ctx->next_commit_index;
 
-        // Wait until this specific chunk index becomes ready.
         while ((idx >= ctx->results_capacity) ||
                (ctx->results[idx].ready == 0)) {
             pthread_cond_wait(&ctx->commit_cond, &ctx->commit_mutex);
@@ -555,7 +429,6 @@ int upload_handle_finish(upload_ctx* ctx, char** out_cid) {
 
         struct upload_chunk_result* r = &ctx->results[idx];
 
-        // Commit this chunk into the manifest.
         if (manifest_add_chunk(ctx->manifest, idx, r->size, r->hash_str) < 0) {
             fprintf(stderr,
                     "[UPLOAD] ERROR: upload_handle_finish: manifest_add_chunk failed for chunk %u\n",
@@ -576,22 +449,18 @@ int upload_handle_finish(upload_ctx* ctx, char** out_cid) {
             ctx->filename ? ctx->filename : "(null)",
             (void*)ctx,
             ctx->total_size);
-    
 
-        // We have copied the hash into the manifest; we no longer need it here.
         if (r->hash_str) {
             free(r->hash_str);
             r->hash_str = NULL;
         }
         r->ready = 0;
 
-        // Maintain next_commit_index and next_chunk_index for logging.
         ctx->next_commit_index++;
         ctx->next_chunk_index++;
     }
 
     pthread_mutex_unlock(&ctx->commit_mutex);
-
 
     if (ctx->declared_total_size != 0 &&
         ctx->total_size != ctx->declared_total_size) {
@@ -616,11 +485,8 @@ int upload_handle_finish(upload_ctx* ctx, char** out_cid) {
         return -2;
     }
 
-
-    // Now all chunks have been committed to the manifest in order.
     manifest_finalize(ctx->manifest, ctx->total_size);
 
-    // Save manifest to disk and obtain CID.
     char* cid = NULL;
     if (manifest_save_and_get_cid(ctx->manifest, &cid) < 0 || !cid) {
         fprintf(stderr, "[UPLOAD] ERROR: manifest_save_and_get_cid failed\n");
@@ -633,7 +499,6 @@ int upload_handle_finish(upload_ctx* ctx, char** out_cid) {
         unlink(path);
     }
 
-    // Free manifest structure in memory.
     manifest_free(ctx->manifest);
     ctx->manifest = NULL;
 
@@ -648,7 +513,6 @@ int upload_handle_finish(upload_ctx* ctx, char** out_cid) {
 
     return 0;
 }
-
 
 int handle_upload_resume(upload_ctx** out_up, const char* auth_token, const uint8_t* payload, uint32_t len, int cfd) {
     if (!out_up || !payload || len == 0) {

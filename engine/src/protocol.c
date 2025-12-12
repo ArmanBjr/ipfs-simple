@@ -1,4 +1,3 @@
-// protocol.c
 #include "protocol.h"
 
 #include <arpa/inet.h>

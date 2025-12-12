@@ -1,70 +1,54 @@
-// src/manifest.c
-// Manifest handling: in-memory manifest structure, JSON save/load, and CID generation.
+#define _GNU_SOURCE
 
-#define _GNU_SOURCE  // needed for open_memstream on GNU systems
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
 
-#include <stdio.h>      // FILE, fprintf, fopen, etc.
-#include <stdlib.h>     // malloc, free, calloc
-#include <string.h>     // strlen, strdup, memcpy, memset, strstr
-#include <stdint.h>     // uint32_t, uint64_t, uint8_t
-#include <sys/stat.h>   // stat, fstat
-#include <sys/types.h>  // general types
-#include <fcntl.h>      // open flags
-#include <unistd.h>     // close, read, write, fsync
-#include <errno.h>      // errno, strerror
-
-#include "engine_config.h"  // ENGINE_MANIFEST_DIR, ENGINE_MAX_PATH_LEN, etc.
-#include "manifest.h"       // manifest / manifest_chunk declarations
-#include "hash.h"           // hash_compute, hash_to_multihash_b32, hash_result_t
-#include "util.h"           // util_join_path, util_mkdir_p, logging helpers
+#include "engine_config.h"
+#include "manifest.h"
+#include "hash.h"
+#include "util.h"
 #include "locks.h"
 #include "blockstore.h"
 
-
 struct manifest* manifest_parse_from_json(const char* json_buf);
 
-// Build full path for a manifest file: ENGINE_MANIFEST_DIR/<cid>.json
-// out_path must have at least out_size bytes.
-// Returns 0 on success, <0 on error.
 static int manifest_make_path(const char* cid, char* out_path, size_t out_size) {
     if (!cid || !out_path) {
         return -1;
     }
 
-    // Build filename "<cid>.json"
     char filename[256];
     int n = snprintf(filename, sizeof(filename), "%s.json", cid);
     if (n < 0 || (size_t)n >= sizeof(filename)) {
-        // formatted string too long
         return -1;
     }
 
-    // Join: ENGINE_MANIFEST_DIR + filename
     if (util_join_path(ENGINE_MANIFEST_DIR, filename, out_path, out_size) < 0) {
         return -1;
     }
 
     return 0;
 }
-// Create a new manifest object in memory.
-// - filename: original file name (may be NULL)
-// - chunk_size: chunk size used when splitting the file
-// - hash_algo: name of hash algorithm (e.g., "blake3"); if NULL, defaults to "blake3"
-//
-// Returns pointer to allocated manifest on success, NULL on allocation failure.
+
 manifest* manifest_create(const char* filename, uint32_t chunk_size, const char* hash_algo) {
     manifest* m = (manifest*)calloc(1, sizeof(*m));
     if (!m) {
         return NULL;
     }
 
-    m->version     = 1;
-    m->chunk_size  = chunk_size;
-    m->total_size  = 0;
+    m->version = 1;
+    m->chunk_size = chunk_size;
+    m->total_size = 0;
     m->chunk_count = 0;
-    m->chunks      = NULL;
+    m->chunks = NULL;
 
-    // Store filename (if provided)
     if (filename) {
         m->filename = strdup(filename);
         if (!m->filename) {
@@ -73,7 +57,6 @@ manifest* manifest_create(const char* filename, uint32_t chunk_size, const char*
         }
     }
 
-    // Store hash algorithm string (default to "blake3" if not provided)
     const char* algo_str = hash_algo ? hash_algo : "blake3";
     m->hash_algo = strdup(algo_str);
     if (!m->hash_algo) {
@@ -84,12 +67,6 @@ manifest* manifest_create(const char* filename, uint32_t chunk_size, const char*
     return m;
 }
 
-// Add a new chunk entry to the manifest.
-// - index: chunk index (0,1,2,...)
-// - size:  size of the chunk in bytes
-// - hash_str: multihash base32 string for this chunk
-//
-// Returns 0 on success, <0 on error.
 int manifest_add_chunk(manifest* m, uint32_t index, uint32_t size, const char* hash_str) {
     if (!m || !hash_str) {
         return -1;
@@ -106,7 +83,7 @@ int manifest_add_chunk(manifest* m, uint32_t index, uint32_t size, const char* h
 
     manifest_chunk* c = &m->chunks[m->chunk_count];
     c->index = index;
-    c->size  = size;
+    c->size = size;
     c->hash_str = strdup(hash_str);
 
     if (!c->hash_str) {
@@ -118,7 +95,6 @@ int manifest_add_chunk(manifest* m, uint32_t index, uint32_t size, const char* h
     return 0;
 }
 
-// Comparator used for qsort to order chunks by their index (ascending).
 static int cmp_chunk_index(const void* a, const void* b) {
     const manifest_chunk* ca = (const manifest_chunk*)a;
     const manifest_chunk* cb = (const manifest_chunk*)b;
@@ -128,23 +104,15 @@ static int cmp_chunk_index(const void* a, const void* b) {
     return 0;
 }
 
-// Finalize manifest after all chunks have been added.
-// - sets the total_size
-// - optionally sorts chunks by index so they are in deterministic order
 void manifest_finalize(manifest* m, uint64_t total_size) {
     if (!m) {
         return;
     }
 
-    // Store total file size
     m->total_size = total_size;
 
-    // Sort chunks by index so that [0..chunk_count-1] is in ascending order
     if (m->chunk_count > 1 && m->chunks) {
-        qsort(m->chunks,
-              m->chunk_count,
-              sizeof(manifest_chunk),
-              cmp_chunk_index);
+        qsort(m->chunks, m->chunk_count, sizeof(manifest_chunk), cmp_chunk_index);
     }
 }
 
@@ -156,10 +124,9 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
 
     pthread_rwlock_wrlock(&g_manifest_lock);
 
-    // 1) ساخت JSON در حافظه
-    char*  json_buf = NULL;
+    char* json_buf = NULL;
     size_t json_len = 0;
-    FILE*  mem = open_memstream(&json_buf, &json_len);
+    FILE* mem = open_memstream(&json_buf, &json_len);
     if (!mem) {
         pthread_rwlock_unlock(&g_manifest_lock);
         return -1;
@@ -199,7 +166,6 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
         return -1;
     }
 
-    // 2) محاسبه CID از روی JSON
     hash_result_t h;
     memset(&h, 0, sizeof(h));
     hash_algo_t algo = hash_algo_from_env();
@@ -218,7 +184,6 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
     }
     hash_result_free(&h);
 
-    // 3) آپدیت refcount برای بلاک‌ها
     for (uint32_t i = 0; i < m->chunk_count; ++i) {
         const char* hash = m->chunks[i].hash_str;
         if (!hash) continue;
@@ -227,7 +192,7 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
         snprintf(ref_path, sizeof(ref_path), "%s/%s.ref", ENGINE_BLOCKS_DIR, hash);
 
         FILE* f = fopen(ref_path, "r+");
-        int   refcount = 0;
+        int refcount = 0;
         if (f) {
             if (fscanf(f, "%d", &refcount) != 1) {
                 refcount = 0;
@@ -248,7 +213,6 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
         fclose(f);
     }
 
-    // 4) نوشتن مانیفست روی دیسک (atomic)
     if (util_mkdir_p(ENGINE_MANIFEST_DIR) < 0) {
         free(json_buf);
         free(cid);
@@ -298,14 +262,10 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
         return -1;
     }
 
-    // 5) مدیریت owner/public برای این CID
-    // اگر auth_token با "owner-" شروع بشه → فایل owner بساز
-    // در غیر این صورت → هر owner قبلی را پاک کن (public)
     char owner_path[ENGINE_MAX_PATH_LEN];
     snprintf(owner_path, sizeof(owner_path), "owners/%s.owner", cid);
 
     if (util_mkdir_p("owners") < 0) {
-        // اگر دایرکتوری owners ساخته نشد، فقط لاگ؛ مانیفست همچنان معتبر است
         log_error("[AUTH] Failed to create owners directory");
     } else {
         if (m->auth_token && strncmp(m->auth_token, "owner-", 6) == 0) {
@@ -317,7 +277,6 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
                 log_error("[AUTH] Failed to create owner file: %s", owner_path);
             }
         } else {
-            // فایل public یا auth غیر-owner: owner قبلی پاک می‌شود
             unlink(owner_path);
         }
     }
@@ -327,7 +286,6 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
     pthread_rwlock_unlock(&g_manifest_lock);
     return 0;
 }
-
 
 int manifest_save_progress(const manifest* m, const char* upload_id) {
     if (!m || !upload_id) return -1;
@@ -373,13 +331,6 @@ int manifest_save_progress(const manifest* m, const char* upload_id) {
     return 0;
 }
 
-
-
-
-
-
-// Helper: read entire file into memory (NUL-terminated)
-// Returns 0 on success, <0 on error.
 static int manifest_read_file(const char* path, char** out_buf, size_t* out_len) {
     *out_buf = NULL;
     *out_len = 0;
@@ -404,7 +355,7 @@ static int manifest_read_file(const char* path, char** out_buf, size_t* out_len)
     }
 
     size_t len = (size_t)st.st_size;
-    char* buf = (char*)malloc(len + 1); // +1 for '\0'
+    char* buf = (char*)malloc(len + 1);
     if (!buf) {
         log_error("[MANIFEST] malloc failed for %s", path);
         close(fd);
@@ -421,7 +372,7 @@ static int manifest_read_file(const char* path, char** out_buf, size_t* out_len)
             close(fd);
             return -1;
         }
-        if (r == 0) break; // EOF
+        if (r == 0) break;
         off += (size_t)r;
     }
     close(fd);
@@ -432,23 +383,18 @@ static int manifest_read_file(const char* path, char** out_buf, size_t* out_len)
     return 0;
 }
 
-// Helper: extract string field: "key": "value"
-static int manifest_extract_string(const char* json,
-                                   const char* key,
-                                   char* out_buf,
-                                   size_t out_size) {
+static int manifest_extract_string(const char* json, const char* key, char* out_buf, size_t out_size) {
     char pattern[64];
     snprintf(pattern, sizeof(pattern), "\"%s\"", key);
 
     const char* p = strstr(json, pattern);
     if (!p) return -1;
 
-    // Move to first double-quote after colon
     p = strchr(p, ':');
     if (!p) return -1;
     p = strchr(p, '"');
     if (!p) return -1;
-    p++; // after opening quote
+    p++;
 
     const char* end = strchr(p, '"');
     if (!end) return -1;
@@ -461,10 +407,7 @@ static int manifest_extract_string(const char* json,
     return 0;
 }
 
-// Helper: extract unsigned long long field: "key": 12345
-static int manifest_extract_ull(const char* json,
-                                const char* key,
-                                unsigned long long* out_val) {
+static int manifest_extract_ull(const char* json, const char* key, unsigned long long* out_val) {
     char pattern[64];
     snprintf(pattern, sizeof(pattern), "\"%s\"", key);
 
@@ -473,9 +416,8 @@ static int manifest_extract_ull(const char* json,
 
     p = strchr(p, ':');
     if (!p) return -1;
-    p++; // after ':'
+    p++;
 
-    // Skip spaces
     while (*p == ' ' || *p == '\t') p++;
 
     unsigned long long v = 0;
@@ -486,10 +428,7 @@ static int manifest_extract_ull(const char* json,
     return 0;
 }
 
-// Helper: extract uint32 field (به صورت ساده از manifest_extract_ull استفاده می‌کنیم)
-static int manifest_extract_u32(const char* json,
-                                const char* key,
-                                uint32_t* out_val) {
+static int manifest_extract_u32(const char* json, const char* key, uint32_t* out_val) {
     unsigned long long v = 0;
     if (manifest_extract_ull(json, key, &v) < 0) {
         return -1;
@@ -498,22 +437,12 @@ static int manifest_extract_u32(const char* json,
     return 0;
 }
 
-/**
- * Load manifest from disk given a CID.
- *
- * This assumes the JSON format produced by manifest_save_and_get_cid().
- *
- * Returns:
- *   manifest* on success (caller must call manifest_free),
- *   NULL on error.
- */
 manifest* manifest_load_from_cid(const char* cid) {
     if (!cid) {
         log_error("[MANIFEST] manifest_load_from_cid called with NULL cid");
         return NULL;
     }
 
-    // Reader lock برای خواندن manifest
     pthread_rwlock_rdlock(&g_manifest_lock);
 
     char path[ENGINE_MAX_PATH_LEN];
@@ -526,12 +455,10 @@ manifest* manifest_load_from_cid(const char* cid) {
     char* json_buf = NULL;
     size_t json_len = 0;
     if (manifest_read_file(path, &json_buf, &json_len) < 0) {
-        // error already logged
         pthread_rwlock_unlock(&g_manifest_lock);
         return NULL;
     }
 
-    // 1) Extract basic fields: filename, chunk_size, total_size, hash_algo
     char filename[256];
     char hash_algo[64];
     uint32_t chunk_size = 0;
@@ -545,7 +472,6 @@ manifest* manifest_load_from_cid(const char* cid) {
     }
 
     if (manifest_extract_string(json_buf, "hash_algo", hash_algo, sizeof(hash_algo)) < 0) {
-        // default to blake3 if not found
         strcpy(hash_algo, "blake3");
     }
 
@@ -563,7 +489,6 @@ manifest* manifest_load_from_cid(const char* cid) {
         return NULL;
     }
 
-    // 2) Create manifest struct
     manifest* m = manifest_create(filename, chunk_size, hash_algo);
     if (!m) {
         log_error("[MANIFEST] manifest_create failed while loading %s", path);
@@ -572,7 +497,6 @@ manifest* manifest_load_from_cid(const char* cid) {
         return NULL;
     }
 
-    // 3) Parse chunks array
     const char* p = strstr(json_buf, "\"chunks\"");
     if (!p) {
         log_error("[MANIFEST] no \"chunks\" array in %s", path);
@@ -591,14 +515,12 @@ manifest* manifest_load_from_cid(const char* cid) {
         return NULL;
     }
 
-    // Move after '['
     p++;
 
     while (1) {
-        // Find next '{'
         const char* obj_start = strchr(p, '{');
         if (!obj_start) {
-            break; // no more chunks
+            break;
         }
 
         const char* obj_end = strchr(obj_start, '}');
@@ -610,7 +532,6 @@ manifest* manifest_load_from_cid(const char* cid) {
             return NULL;
         }
 
-        // Copy chunk JSON into a small buffer for sscanf
         size_t obj_len = (size_t)(obj_end - obj_start + 1);
         if (obj_len >= 512) {
             log_error("[MANIFEST] chunk object too large in %s", path);
@@ -628,7 +549,6 @@ manifest* manifest_load_from_cid(const char* cid) {
         uint32_t size = 0;
         char hash_str[256];
 
-        // Expected format: { "index": %u, "size": %u, "hash": "..." }
         int matched = sscanf(chunk_json,
                              " { \"index\" : %u , \"size\" : %u , \"hash\" : \"%255[^\"]\"",
                              &idx, &size, hash_str);
@@ -654,47 +574,30 @@ manifest* manifest_load_from_cid(const char* cid) {
             return NULL;
         }
 
-        // Continue after this object
         p = obj_end + 1;
     }
 
-    // 4) Finalize manifest (sort by index + set total_size)
     manifest_finalize(m, (uint64_t)total_size_ull);
 
     free(json_buf);
 
-    // موفقیت → قفل را آزاد کن
     pthread_rwlock_unlock(&g_manifest_lock);
     return m;
 }
 
-
-/**
- * Free all memory associated with a manifest structure.
- *
- * This function frees:
- *  - filename string
- *  - hash_algo string
- *  - each chunk.hash_str
- *  - the chunks array
- *  - the manifest struct itself
- */
- void manifest_free(manifest* m) {
+void manifest_free(manifest* m) {
     if (!m) return;
 
-    // Free filename
     if (m->filename) {
         free(m->filename);
         m->filename = NULL;
     }
 
-    // Free hash algorithm string
     if (m->hash_algo) {
         free(m->hash_algo);
         m->hash_algo = NULL;
     }
 
-    // Free chunks array
     if (m->chunks) {
         for (uint32_t i = 0; i < m->chunk_count; ++i) {
             free(m->chunks[i].hash_str);
@@ -708,80 +611,67 @@ manifest* manifest_load_from_cid(const char* cid) {
         free(m->auth_token);
         m->auth_token = NULL;
     }
-    // Finally free the manifest struct
+
     free(m);
 }
-
 
 int manifest_delete(const char* cid) {
     if (!cid) return -1;
     manifest* m = manifest_load_from_cid(cid);
     if (!m) return -1;
-    
-    
+
     for (uint32_t i = 0; i < m->chunk_count; ++i) {
-    const char* hash_str = m->chunks[i].hash_str;
-    char chunk_path[ENGINE_MAX_PATH_LEN];
-    if (blockstore_make_path(hash_str, chunk_path) < 0) continue;
-    
-    
-    char ref_path[ENGINE_MAX_PATH_LEN];
-    snprintf(ref_path, sizeof(ref_path), "%s.ref", chunk_path);
-    
-    
-    FILE* f = fopen(ref_path, "r+");
-    if (!f) continue;
-    
-    
-    int count = 0;
-    if (fscanf(f, "%d", &count) != 1) {
-    fclose(f);
-    continue;
+        const char* hash_str = m->chunks[i].hash_str;
+        char chunk_path[ENGINE_MAX_PATH_LEN];
+        if (blockstore_make_path(hash_str, chunk_path) < 0) continue;
+
+        char ref_path[ENGINE_MAX_PATH_LEN];
+        snprintf(ref_path, sizeof(ref_path), "%s.ref", chunk_path);
+
+        FILE* f = fopen(ref_path, "r+");
+        if (!f) continue;
+
+        int count = 0;
+        if (fscanf(f, "%d", &count) != 1) {
+            fclose(f);
+            continue;
+        }
+        count--;
+        rewind(f);
+
+        if (count > 0) {
+            fprintf(f, "%d\n", count);
+            fclose(f);
+        } else {
+            fclose(f);
+            unlink(ref_path);
+            unlink(chunk_path);
+        }
     }
-    count--;
-    rewind(f);
-    
-    
-    if (count > 0) {
-    fprintf(f, "%d\n", count);
-    fclose(f);
-    } else {
-    fclose(f);
-    unlink(ref_path);
-    unlink(chunk_path);
-    }
-    }
-    
-    
-    // پاک کردن manifest
+
     char path[ENGINE_MAX_PATH_LEN];
     if (manifest_make_path(cid, path, sizeof(path)) == 0) {
-    unlink(path);
+        unlink(path);
     }
-    
-    
+
     manifest_free(m);
     return 0;
 }
 
-
-
 manifest* manifest_load_in_progress(const char* upload_id) {
     if (!upload_id) return NULL;
-    
+
     char path[ENGINE_MAX_PATH_LEN];
     snprintf(path, sizeof(path), "manifests/in-progress/%s.json", upload_id);
-    
+
     size_t len = 0;
     char* buf = NULL;
     if (manifest_read_file(path, &buf, &len) < 0 || !buf) return NULL;
-    
-    // reuse manifest parsing logic
+
     manifest* m = manifest_parse_from_json(buf);
     free(buf);
     return m;
 }
-
 
 manifest* manifest_parse_from_json(const char* json_buf) {
     if (!json_buf) return NULL;
@@ -797,7 +687,7 @@ manifest* manifest_parse_from_json(const char* json_buf) {
     }
 
     if (manifest_extract_string(json_buf, "hash_algo", hash_algo, sizeof(hash_algo)) < 0) {
-        strcpy(hash_algo, "blake3");  
+        strcpy(hash_algo, "blake3");
     }
 
     if (manifest_extract_u32(json_buf, "chunk_size", &chunk_size) < 0 ||
@@ -819,7 +709,7 @@ manifest* manifest_parse_from_json(const char* json_buf) {
         return NULL;
     }
 
-    p++;  
+    p++;
 
     while (1) {
         const char* obj_start = strchr(p, '{');
@@ -872,7 +762,6 @@ manifest* manifest_parse_from_json(const char* json_buf) {
         p = obj_end + 1;
     }
 
-    // 4. finalize
     manifest_finalize(m, (uint64_t)total_size_ull);
     return m;
 }

@@ -1,6 +1,3 @@
-// Build: gcc -O2 -pthread -o engine engine.c
-// Run:   ./engine /tmp/engine.sock
-
 #define _GNU_SOURCE
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -31,19 +28,17 @@
 static const char* g_sock_path = NULL;
 
 void handle_connection(int cfd) {
-    upload_ctx*   up   = NULL;
+    upload_ctx* up = NULL;
     download_ctx* down = NULL;
-    char* conn_auth_token = NULL;  
-
+    char* conn_auth_token = NULL;
 
     for (;;) {
-        uint8_t  op      = 0;
+        uint8_t op = 0;
         uint8_t* payload = NULL;
-        uint32_t len     = 0;
+        uint32_t len = 0;
 
         int rc = recv_frame(cfd, &op, &payload, &len);
         if (rc == 0) {
-            // EOF / client closed connection
             fprintf(stderr, "[ENGINE] connection closed by peer\n");
             break;
         }
@@ -120,8 +115,7 @@ void handle_connection(int cfd) {
             }
 
             break;
-        }   
-        
+        }
 
         case OP_UPLOAD_RESUME: {
             if (up != NULL) {
@@ -136,8 +130,7 @@ void handle_connection(int cfd) {
         
             break;
         }
-        
-        
+
         case OP_UPLOAD_FINISH: {
             fprintf(stderr, "[ENGINE] OP_UPLOAD_FINISH received\n");
 
@@ -164,7 +157,6 @@ void handle_connection(int cfd) {
                 close_conn = 1;
                 break;
             }
-
 
             if (!cid) {
                 fprintf(stderr, "[ERROR] [UPLOAD] upload_handle_finish returned NULL cid\n");
@@ -199,8 +191,7 @@ void handle_connection(int cfd) {
                 close_conn = 1;
                 break;
             }
-        
-            
+
             char owner_path[ENGINE_MAX_PATH_LEN];
             snprintf(owner_path, sizeof(owner_path), "owners/%s.owner", cid_str);
         
@@ -234,21 +225,17 @@ void handle_connection(int cfd) {
                 }
             }
 
-        
-        
             if (manifest_delete(cid_str) < 0) {
                 fprintf(stderr, "[DELETE] failed to delete manifest and chunks for CID=%s\n", cid_str);
             } else {
                 fprintf(stderr, "[DELETE] deleted manifest and (possibly) orphaned chunks for CID=%s\n", cid_str);
-        
+
                 unlink(owner_path);
             }
-        
+
             free(cid_str);
             break;
         }
-        
-        
 
         case OP_DOWNLOAD_START: {
             fprintf(stderr, "[ENGINE] OP_DOWNLOAD_START received (len=%u)\n", len);
@@ -289,7 +276,7 @@ void handle_connection(int cfd) {
                     break;
                 }
             }
-            
+
             char owner_path[ENGINE_MAX_PATH_LEN];
             snprintf(owner_path, sizeof(owner_path), "owners/%s.owner", cid_str);
 
@@ -314,7 +301,6 @@ void handle_connection(int cfd) {
                 fclose(f);
             }
 
-
             if (download_init(down, cid_str) < 0) {
                 const char* err_msg = "DOWNLOAD_ERROR";
                 send_frame(cfd, OP_DOWNLOAD_DONE, err_msg, (uint32_t)strlen(err_msg));
@@ -338,7 +324,6 @@ void handle_connection(int cfd) {
 
             uint32_t chunk_count = down->manifest->chunk_count;
 
-            // Edge case: empty file (no chunks)
             if (chunk_count == 0) {
                 fprintf(stderr, "[ENGINE] DOWNLOAD_START: empty file, sending DONE\n");
                 if (send_frame(cfd, OP_DOWNLOAD_DONE, NULL, 0) < 0) {
@@ -351,7 +336,6 @@ void handle_connection(int cfd) {
                 break;
             }
 
-            // Initialize merger state and preallocate result slots
             pthread_mutex_lock(&down->mutex);
 
             down->next_request_index = 0;
@@ -372,7 +356,6 @@ void handle_connection(int cfd) {
                     break;
                 }
 
-                // Initialize new slots
                 for (uint32_t i = down->results_capacity; i < new_cap; ++i) {
                     new_arr[i].ready = 0;
                     new_arr[i].data  = NULL;
@@ -383,7 +366,6 @@ void handle_connection(int cfd) {
                 down->results_capacity = new_cap;
             }
 
-            // Reset any existing slots (if the context is ever reused)
             for (uint32_t i = 0; i < chunk_count; ++i) {
                 if (down->results[i].data) {
                     free(down->results[i].data);
@@ -395,7 +377,6 @@ void handle_connection(int cfd) {
 
             pthread_mutex_unlock(&down->mutex);
 
-            // Submit one download job per chunk
             for (uint32_t i = 0; i < chunk_count; ++i) {
                 if (threadpool_submit_download_chunk(down, i) < 0) {
                     fprintf(stderr,
@@ -410,11 +391,9 @@ void handle_connection(int cfd) {
                 break;
             }
 
-            // Sequential merger: send chunks in order 0..chunk_count-1
             while (!close_conn && down->next_send_index < chunk_count) {
                 pthread_mutex_lock(&down->mutex);
 
-                // Wait until the next chunk is ready
                 while (down->next_send_index < chunk_count &&
                        (down->next_send_index >= down->results_capacity ||
                         down->results[down->next_send_index].ready == 0)) {
@@ -429,8 +408,7 @@ void handle_connection(int cfd) {
                 uint32_t idx = down->next_send_index;
                 struct download_chunk_result r = down->results[idx];
 
-                // Clear slot inside the context to avoid double-free on destroy
-                down->results[idx].data  = NULL;
+                down->results[idx].data = NULL;
                 down->results[idx].len   = 0;
                 down->results[idx].ready = 0;
 
@@ -475,12 +453,9 @@ void handle_connection(int cfd) {
             break;
         }
 
-
-
-
         case OP_LIST_FILES: {
             fprintf(stderr, "[ENGINE] OP_LIST_FILES received\n");
-            
+
             if (!conn_auth_token) {
                 fprintf(stderr, "[AUTH] LIST_FILES without auth token\n");
                 const char* err_msg = "[]";
@@ -510,7 +485,7 @@ void handle_connection(int cfd) {
                         continue;
                     }
                     fclose(f);
-                    
+
                     token[strcspn(token, "\r\n")] = '\0';
                     if (strcmp(token, conn_auth_token) != 0) continue;
 
@@ -526,7 +501,7 @@ void handle_connection(int cfd) {
                     FILE* mf = fopen(manifest_path, "r");
                     char filename[256] = "";
                     uint64_t filesize = 0;
-                    
+
                     if (mf) {
                         char line[512];
                         while (fgets(line, sizeof(line), mf)) {
@@ -580,7 +555,6 @@ void handle_connection(int cfd) {
             fprintf(stderr,
                     "[ERROR] [ENGINE] unknown opcode: 0x%02x (len=%u)\n",
                     op, len);
-            // Unknown opcode: close the connection to avoid undefined state.
             close_conn = 1;
             break;
         }
@@ -641,17 +615,15 @@ int main(int argc, char** argv) {
         close(fd);
         return 2;
     }
-    // Initialize global read/write locks before starting to listen.
     if (locks_init() < 0) {
         fprintf(stderr, "[ENGINE] ERROR: locks_init failed\n");
         close(fd);
         return 2;
     }
 
-    // Initialize thread pool 
-    int num_workers = 16;  
+    int num_workers = 16;
 
-    long cpus = sysconf(_SC_NPROCESSORS_ONLN);  
+    long cpus = sysconf(_SC_NPROCESSORS_ONLN);
     fprintf(stderr, "[ENGINE] auto-detected number of workers: %ld\n", cpus);
     if (cpus > 0 && cpus <= 256) {
         num_workers = (int)cpus;
@@ -661,7 +633,7 @@ int main(int argc, char** argv) {
     if (env != NULL) {
         int parsed = atoi(env);
         if (parsed > 0 && parsed <= 256) {
-            num_workers = parsed;  
+            num_workers = parsed;
         } else {
             fprintf(stderr, "[ENGINE] Invalid CENGINE_WORKERS env value: %s, using auto-detected=%d\n", env, num_workers);
         }
@@ -684,11 +656,9 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    
     if (listen(fd, 64) < 0) {
         perror("listen");
         close(fd);
-        // locks_init succeeded; we can safely shut locks down.
         threadpool_shutdown();
         locks_shutdown();
         return 2;
@@ -706,12 +676,9 @@ int main(int argc, char** argv) {
             break;
         }
 
-        // Submit this connection as a job to the thread pool.
         threadpool_submit_connection(cfd);
     }
 
-    // On error / shutdown, stop accepting new connections and
-    // gracefully shut down the thread pool.
     threadpool_shutdown();
     close(fd);
     unlink(g_sock_path);
