@@ -229,7 +229,13 @@ int manifest_save_and_get_cid(const manifest* m, char** out_cid) {
     }
 
     char tmp_path[ENGINE_MAX_PATH_LEN];
-    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%ld", path, (long)getpid());
+    int n_tmp = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%ld", path, (long)getpid());
+    if (n_tmp < 0 || (size_t)n_tmp >= sizeof(tmp_path)) {
+        free(json_buf);
+        free(cid);
+        pthread_rwlock_unlock(&g_manifest_lock);
+        return -1;
+    }
 
     int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0) {
@@ -626,7 +632,8 @@ int manifest_delete(const char* cid) {
         if (blockstore_make_path(hash_str, chunk_path) < 0) continue;
 
         char ref_path[ENGINE_MAX_PATH_LEN];
-        snprintf(ref_path, sizeof(ref_path), "%s.ref", chunk_path);
+        int n_ref = snprintf(ref_path, sizeof(ref_path), "%s.ref", chunk_path);
+        if (n_ref < 0 || (size_t)n_ref >= sizeof(ref_path)) continue;
 
         FILE* f = fopen(ref_path, "r+");
         if (!f) continue;
