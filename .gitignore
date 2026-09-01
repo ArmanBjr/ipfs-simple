@@ -55,3 +55,4 @@ Thumbs.db
 
 # Docs
 *.pdf
+!document.pdf
