@@ -1,100 +1,119 @@
-# IPFS Gateway
+# IPFS Simple
 
-A content-addressed storage system with a web gateway interface. The project consists of two main components:
+A simplified **content-addressed storage** system with a web gateway — inspired by IPFS. Built as the Operating Systems course project at Ferdowsi University of Mashhad (FUM, 1404).
 
-- **Engine**: High-performance C storage engine with UNIX socket API
-- **Gateway**: FastAPI web interface for user interaction
+Two services work together:
+
+- **Engine** — high-performance C storage backend with a UNIX-socket binary API
+- **Gateway** — FastAPI web UI for signup, upload, download, and file listing
 
 ## Features
 
-- **Content-Addressed Storage**: Files stored by hash (CID) with automatic deduplication
-- **Chunking**: Automatic file splitting into 256KB chunks
-- **Blake3 Hashing**: Fast cryptographic hashing for content identification
-- **User Authentication**: Secure signup/signin with session management
-- **Owner Tokens**: SHA-256 based authentication tokens for engine communication
-- **File Operations**: Upload, download, and list files via web interface
-- **Thread Pool**: Concurrent request handling in the C engine
-- **Docker Support**: Fully containerized deployment
+- **Content-addressed storage** — files identified by Blake3 hash (CID) with automatic deduplication
+- **Chunking** — files split into 256 KB blocks
+- **User authentication** — signup/signin with session cookies
+- **Owner tokens** — SHA-256 tokens for gateway ↔ engine authorization
+- **Concurrent engine** — thread-pool request handling in C
+- **Docker deployment** — `docker-compose` for one-command startup
 
-## Project Structure
+## Tech stack
+
+| Layer | Stack |
+|-------|-------|
+| Engine | C11, Blake3, pthreads, UNIX domain sockets |
+| Gateway | Python 3, FastAPI, Jinja2, Uvicorn |
+| Ops | Docker, Docker Compose, Make |
+
+## Project structure
 
 ```
 .
-├── engine/              # C storage engine
-│   ├── src/             # Source files
-│   ├── include/         # Header files
-│   ├── deps/            # Dependencies (Blake3)
-│   └── Makefile         # Build configuration
-├── gateway/             # FastAPI web gateway
-│   ├── core/            # Core modules (config, engine client, users)
-│   ├── routers/         # Route handlers (auth, files, pages)
-│   ├── static/          # CSS and assets
-│   ├── templates/       # Jinja2 HTML templates
+├── engine/                 # C storage engine
+│   ├── src/                # Implementation
+│   ├── include/            # Public headers
+│   ├── deps/blake3/        # Vendored Blake3
+│   └── Makefile
+├── gateway/                # FastAPI web gateway
+│   ├── core/               # Config, engine client, users
+│   ├── routers/            # Auth, files, pages
+│   ├── static/             # CSS
+│   ├── templates/          # HTML (Jinja2)
 │   └── requirements.txt
 ├── docker-compose.yml
-└── Makefile
+├── Makefile
+└── document.pdf            # Project report (Persian)
 ```
 
-## Quick Start
-
-### Using Docker
+## Quick start (Docker)
 
 ```bash
-# start both services
+git clone https://github.com/ArmanBjr/ipfs-simple.git
+cd ipfs-simple
 make up
-
-# view logs (all services)
-make logs
-
-# view logs separately (use different terminals)
-make logs-engine
-make logs-gateway
-
-# stop services
-make down
-
-# complete reset (removes all data and volumes)
-make reset
 ```
 
-### Local
+Open **http://localhost:8000** — sign up, then upload and download files.
+
+| Command | Description |
+|---------|-------------|
+| `make up` | Build and start engine + gateway |
+| `make down` | Stop services (keep data) |
+| `make reset` | Stop and wipe all volumes |
+| `make logs` | Follow all logs |
+| `make logs-engine` | Engine logs only |
+| `make logs-gateway` | Gateway logs only |
+| `make clean` | Remove build artifacts and runtime data |
+
+## Local development
+
+**Terminal 1 — engine:**
 
 ```bash
-# run engine in first terminal
 cd engine
 make
 ./engine /tmp/engine.sock
+```
 
-# run gatewat in second terminal
+**Terminal 2 — gateway:**
+
+```bash
 cd gateway
 python -m venv .venv
-source .venv/bin/activate
+# Windows:  .venv\Scripts\activate
+# Linux:    source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-## Makefile Commands
+## Architecture
 
-| Command             | Description                               |
-| ------------------- | ----------------------------------------- |
-| `make up`           | Build and start all services              |
-| `make down`         | Stop all services (keeps data)            |
-| `make reset`        | Stop services and remove all volumes/data |
-| `make logs`         | View logs from all services               |
-| `make logs-engine`  | View engine logs only                     |
-| `make logs-gateway` | View gateway logs only                    |
-| `make clean`        | Clean build artifacts and cache           |
+```
+Browser  →  Gateway (FastAPI :8000)
+                ↓  UNIX socket (/tmp/engine.sock)
+            Engine (C)  →  blocks/  manifests/  owners/
+```
 
-### Data Separation
+**Data separation**
 
-- **Gateway**: Manages `users.json` (authentication)
-- **Engine**: Manages `blocks/`, `manifests/`, `owners/` (storage)
-- **Socket**: Shared at `/tmp/engine.sock`
+- Gateway stores `users.json` (authentication)
+- Engine stores `blocks/`, `manifests/`, `owners/` (content)
+- Shared socket at `/tmp/engine.sock`
 
-### Binary Protocol
+**Binary protocol** (engine API)
 
-The engine communicates via a custom binary protocol over UNIX sockets:
+- Upload: `OP_UPLOAD_START` → `OP_UPLOAD_CHUNK` → `OP_UPLOAD_FINISH`
+- Download: `OP_DOWNLOAD_START` → `OP_DOWNLOAD_CHUNK` → `OP_DOWNLOAD_DONE`
+- List: `OP_LIST_FILES` → `OP_LIST_RESPONSE`
 
-- `OP_UPLOAD_START`, `OP_UPLOAD_CHUNK`, `OP_UPLOAD_FINISH`
-- `OP_DOWNLOAD_START`, `OP_DOWNLOAD_CHUNK`, `OP_DOWNLOAD_DONE`
-- `OP_LIST_FILES`, `OP_LIST_RESPONSE`
+## Documentation
+
+See [`document.pdf`](document.pdf) for the full project report (design, implementation, and evaluation).
+
+## Authors
+
+- **Arman Bijari** — [GitHub](https://github.com/ArmanBjr)
+- **Amir Mohammad Khorasani** — [GitHub](https://github.com/amirilf)
+
+## License
+
+MIT — see [LICENSE](LICENSE).
